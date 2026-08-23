@@ -62,14 +62,25 @@ case "${RLP_SCENES:-synthetic}" in
 esac
 
 # ---- job ----------------------------------------------------------------------------------
-WORKERS="${RLP_WORKERS:-auto}"; [ "$WORKERS" = "auto" ] && WORKERS=$(( $(nproc) - 2 ))
+# worker count from the cgroup CPU quota (nproc reports the whole node on OSMO)
+cpu_quota() {
+  if [ -f /sys/fs/cgroup/cpu.max ]; then read -r q per < /sys/fs/cgroup/cpu.max; [ "$q" != "max" ] && { echo $(( q / per )); return; }; fi
+  nproc
+}
+WORKERS="${RLP_WORKERS:-auto}"; [ "$WORKERS" = "auto" ] && WORKERS=$(( $(cpu_quota) - 2 )); [ "$WORKERS" -lt 1 ] && WORKERS=1
+export RLP_WORKERS_RESOLVED="$WORKERS"
 case "$JOB" in
   sweep|train|imitate) ARGS="$ARGS --workers $WORKERS" ;;
 esac
 ( while true; do sleep "$(( SYNC_MIN * 60 ))"; nas_sync; done ) &
 SYNC_PID=$!
-log "running: uv run python scripts/${JOB}.py $ARGS"
-uv run python "scripts/${JOB}.py" $ARGS
+if [ -f "scripts/${JOB}.sh" ]; then
+  log "running: bash scripts/${JOB}.sh $ARGS  (workers=$WORKERS)"
+  bash "scripts/${JOB}.sh" $ARGS
+else
+  log "running: uv run python scripts/${JOB}.py $ARGS"
+  uv run python "scripts/${JOB}.py" $ARGS
+fi
 RC=$?
 log "job exited rc=$RC"
 kill $SYNC_PID 2>/dev/null

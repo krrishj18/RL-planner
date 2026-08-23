@@ -10,7 +10,9 @@ NAS_DEST="${RLP_NAS_DEST:-/volume4/dsta/rl-planner}"; SYNC_MIN="${RLP_SYNC_MIN:-
 export MPLBACKEND=Agg PYTHONUNBUFFERED=1 UV_LINK_MODE=copy
 mkdir -p runs data/scenes data/scenes_v2
 JOBLOG="runs/osmo_${TAG}.log"
-exec > >(tee -a "$JOBLOG") 2>&1
+# no process substitution / background tee: anything holding the task's stdout after the
+# job ends keeps the OSMO task RUNNING until exec_timeout
+log() { echo "[rlp] $(date -u +%H:%M:%S) $*" | tee -a "$JOBLOG"; }
 log "job=$JOB tag=$TAG args=[$ARGS] scenes=${RLP_SCENES:-synthetic} host=$(hostname) nproc=$(nproc)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || log "nvidia-smi unavailable"
 
@@ -43,7 +45,7 @@ if ! command -v uv >/dev/null; then
 fi
 uv --version
 log "uv sync (torch cu128 from the lockfile)"
-uv sync --frozen --extra dev 2>&1 | tail -3 || { log "ERROR: uv sync failed"; nas_sync; exit 3; }
+uv sync --frozen --extra dev 2>&1 | tail -3; [ "${PIPESTATUS[0]}" = 0 ] || { log "ERROR: uv sync failed"; nas_sync; exit 3; }
 GPU_OK=$(uv run python -c "import torch; print(int(torch.cuda.is_available()))" 2>/dev/null || echo 0)
 if [ "$GPU_OK" = "1" ]; then
   uv run python -c "import torch; print('[rlp] torch', torch.__version__, 'cuda', torch.cuda.get_device_name(0))"
@@ -72,18 +74,21 @@ export RLP_WORKERS_RESOLVED="$WORKERS"
 case "$JOB" in
   sweep|train|imitate) ARGS="$ARGS --workers $WORKERS" ;;
 esac
-( while true; do sleep "$(( SYNC_MIN * 60 ))"; nas_sync; done ) &
+# periodic sync: detached from the task's stdout pipe (a lingering child holding the
+# pipe keeps the OSMO task RUNNING after the job exits), logs only to the job log
+export NAS_OK STAGE REL NAS_HOST NAS_DEST JOBLOG AIRLAB_STORAGE_USER AIRLAB_STORAGE_PASS
+setsid bash -c "$(declare -f log nas_sync); while true; do sleep $(( SYNC_MIN * 60 )); nas_sync; done" \
+  </dev/null >/dev/null 2>&1 &
 SYNC_PID=$!
 if [ -f "scripts/${JOB}.sh" ]; then
   log "running: bash scripts/${JOB}.sh $ARGS  (workers=$WORKERS)"
-  bash "scripts/${JOB}.sh" $ARGS
+  bash "scripts/${JOB}.sh" $ARGS 2>&1 | tee -a "$JOBLOG"; RC=${PIPESTATUS[0]}
 else
   log "running: uv run python scripts/${JOB}.py $ARGS"
-  uv run python "scripts/${JOB}.py" $ARGS
+  uv run python "scripts/${JOB}.py" $ARGS 2>&1 | tee -a "$JOBLOG"; RC=${PIPESTATUS[0]}
 fi
-RC=$?
 log "job exited rc=$RC"
-kill $SYNC_PID 2>/dev/null
+kill -- -"$SYNC_PID" 2>/dev/null; kill "$SYNC_PID" 2>/dev/null
 nas_sync
 if [ "${RLP_KEEP_ALIVE:-false}" = "true" ]; then log "keep-alive: sleeping"; exec sleep infinity; fi
 exit $RC

@@ -48,10 +48,6 @@ workflow:
         RLP_ALLOW_CPU: "false"           # true = proceed even if torch.cuda is unavailable
         RLP_WORKERS: "auto"              # env worker processes (auto = cpu count - 2)
       credentials:
-        # Optional: a GENERIC credential named github-token with a field `token`
-        # (fine-grained PAT, read-only on the repo) for private repos.
-        github-token:
-          GITHUB_TOKEN: token
         airlab-storage:
           AIRLAB_STORAGE_USER: username
           AIRLAB_STORAGE_PASS: password

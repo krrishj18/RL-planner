@@ -1,0 +1,68 @@
+# RL-planner training on OSMO (GPU pool), no Docker-in-Docker, no Isaac.
+#
+# Submit with osmo/submit.sh (it ships a clean code snapshot via `--rsync` and
+# sets the RLP_* env vars). Results are rsynced to airlab-storage under
+#   <RLP_NAS_DEST>/<RLP_RUN_TAG>/runs/...   (default /volume4/dsta/rl-planner/<tag>/runs/)
+# every RLP_SYNC_MIN minutes and at exit, using the per-user `airlab-storage`
+# OSMO credential (same mechanism as AirStack/osmo mission uploads).
+
+workflow:
+  name: rlplanner-train
+  groups:
+  - name: train
+    tasks:
+    - name: trainer
+      lead: true
+      image: airlab-docker.andrew.cmu.edu/airstack/airstack-osmo-workspace:latest
+      command: ["bash", "-c"]
+      args:
+      - |
+        set -uo pipefail
+        log() { echo "[rlp-bootstrap] $(date -u +%H:%M:%S) $*"; }
+        ROOT=/osmo/run/workspace/RL-planner
+        if [ -n "${RLP_REPO_URL:-}" ]; then
+          url="$RLP_REPO_URL"
+          if [ -n "${GITHUB_TOKEN:-}" ]; then url="${url/https:\/\//https://${GITHUB_TOKEN}@}"; fi
+          log "cloning ${RLP_REPO_URL} @ ${RLP_BRANCH:-main}"
+          git clone --depth 1 --branch "${RLP_BRANCH:-main}" "$url" "$ROOT" 2>&1 | sed 's#//[^@]*@#//***@#' \
+            || { log "ERROR: git clone failed"; exit 2; }
+        else
+          log "RLP_REPO_URL unset: waiting for an rsync'd snapshot at $ROOT"
+          for i in $(seq 1 900); do
+            [ -f "$ROOT/zz_ship_complete" ] && [ -f "$ROOT/osmo/entrypoint.sh" ] && break; sleep 2
+          done
+          [ -f "$ROOT/zz_ship_complete" ] || { log "ERROR: no code within 30 min"; exit 2; }
+          sleep 5
+        fi
+        cd "$ROOT" && exec bash osmo/entrypoint.sh
+      environment:
+        RLP_REPO_URL: ""                 # e.g. https://github.com/<org>/RL-planner.git (empty = expect rsync snapshot)
+        RLP_BRANCH: "main"
+        RLP_JOB: "train"                 # sweep | train | imitate | eval_policy | run_baselines | bench_env
+        RLP_ARGS: "--smoke --name smoke_osmo"
+        RLP_SCENES: "synthetic"          # synthetic | v1 | v2 | v1+v2 (exported in the pod, deterministic)
+        RLP_RUN_TAG: "smoke"             # NAS subfolder: <RLP_NAS_DEST>/<tag>/
+        RLP_NAS_DEST: "/volume4/dsta/rl-planner"
+        RLP_SYNC_MIN: "10"
+        RLP_KEEP_ALIVE: "false"          # true = sleep after the job for osmo exec / debugging
+        RLP_ALLOW_CPU: "false"           # true = proceed even if torch.cuda is unavailable
+        RLP_WORKERS: "auto"              # env worker processes (auto = cpu count - 2)
+      credentials:
+        # Optional: a GENERIC credential named github-token with a field `token`
+        # (fine-grained PAT, read-only on the repo) for private repos.
+        github-token:
+          GITHUB_TOKEN: token
+        airlab-storage:
+          AIRLAB_STORAGE_USER: username
+          AIRLAB_STORAGE_PASS: password
+          AIRLAB_STORAGE_HOST: host
+
+  resources:
+    default:
+      cpu: 24        # training is env-bound: ~20 CPU workers + trainer
+      gpu: 1
+      memory: 64Gi
+      storage: 60Gi  # uv cache + torch + scenes + runs
+
+  timeout:
+    exec_timeout: 12h

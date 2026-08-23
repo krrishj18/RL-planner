@@ -1,0 +1,25 @@
+# 3. decentral_share_pos_cov — positions/targets (always on) plus the coarse coverage grid.
+# No rays, no segments, no visited records.
+notes: "positions + coverage only"
+comms:
+  mode: range
+  randomize_range: true
+  range_choices: [100.0, 200.0, 400.0, .inf]
+  share:
+    rays: none
+    coverage: true
+    coverage_cell_m: 8.0
+    segments: false
+    visited: false
+    features: false
+tokens:
+  local_size: 64
+  robot_bev_size: 32
+train:
+  use-local: true
+  use-bev: true
+  use-robot-bev: true
+  peers: true
+  # decentralised execution: no same-decision claim mask. A peer's intent reaches this
+  # robot only through gossip, one decision later (CONTRACTS.md 6).
+  sequential_decode: false

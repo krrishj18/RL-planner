@@ -1,0 +1,25 @@
+# 4. decentral_share_rays — positions/targets plus peer rays. No coverage, no segments,
+# no visited records: a robot only learns where a peer saw something far away.
+notes: "positions + rays only"
+comms:
+  mode: range
+  randomize_range: true
+  range_choices: [100.0, 200.0, 400.0, .inf]
+  share:
+    rays: all
+    ray_cap: 64
+    coverage: false
+    segments: false
+    visited: false
+    features: false
+tokens:
+  local_size: 64
+  robot_bev_size: 32
+train:
+  use-local: true
+  use-bev: true
+  use-robot-bev: true
+  peers: true
+  # decentralised execution: no same-decision claim mask. A peer's intent reaches this
+  # robot only through gossip, one decision later (CONTRACTS.md 6).
+  sequential_decode: false

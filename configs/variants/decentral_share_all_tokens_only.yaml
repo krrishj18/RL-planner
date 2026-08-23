@@ -1,0 +1,27 @@
+# 7. decentral_share_all_tokens_only — variant 2 with no dense input at all: the actor sees
+# tokens (items, queries, peers) and nothing else. The env does not build the rasters.
+notes: "share everything; tokens only (no local crop, no per-robot BEV)"
+comms:
+  mode: range
+  randomize_range: true
+  range_choices: [100.0, 200.0, 400.0, .inf]
+  share:
+    rays: all
+    ray_cap: 64
+    coverage: true
+    coverage_cell_m: 8.0
+    segments: true
+    segment_cap: 32
+    visited: true
+    features: false
+tokens:
+  local_size: 0
+  robot_bev_size: 0
+train:
+  use-local: false
+  use-bev: true
+  use-robot-bev: false
+  peers: true
+  # decentralised execution: no same-decision claim mask. A peer's intent reaches this
+  # robot only through gossip, one decision later (CONTRACTS.md 6).
+  sequential_decode: false

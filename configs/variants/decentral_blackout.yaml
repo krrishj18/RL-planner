@@ -1,0 +1,25 @@
+# 5. decentral_blackout — one contact at spawn (positions/targets), nothing afterwards.
+# The lower bound: every robot explores on its own belief for the whole episode.
+notes: "positions at spawn only; no further contact"
+comms:
+  mode: range
+  range_m: 0.0
+  randomize_range: false
+  spawn_exchange: true
+  share:
+    rays: none
+    coverage: false
+    segments: false
+    visited: false
+    features: false
+tokens:
+  local_size: 64
+  robot_bev_size: 32
+train:
+  use-local: true
+  use-bev: true
+  use-robot-bev: true
+  peers: true
+  # decentralised execution: no same-decision claim mask. A peer's intent reaches this
+  # robot only through gossip, one decision later (CONTRACTS.md 6).
+  sequential_decode: false

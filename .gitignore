@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+data/scenes/
+data/scenes_v2/
+runs/
+*.mp4
+*.gif
+__pycache__/
+
+zz_ship_complete

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Pod entrypoint for RL-planner jobs on OSMO. Runs inside airstack-osmo-workspace
+# (Ubuntu 24.04, python3.12, rsync, sshpass) as plain (non-DinD) task.
+set -uo pipefail
+log() { echo "[rlp] $(date -u +%H:%M:%S) $*"; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+JOB="${RLP_JOB:-train}"; ARGS="${RLP_ARGS:-}"; TAG="${RLP_RUN_TAG:-job}"
+NAS_DEST="${RLP_NAS_DEST:-/volume4/dsta/rl-planner}"; SYNC_MIN="${RLP_SYNC_MIN:-10}"
+export MPLBACKEND=Agg PYTHONUNBUFFERED=1 UV_LINK_MODE=copy
+mkdir -p runs data/scenes data/scenes_v2
+JOBLOG="runs/osmo_${TAG}.log"
+exec > >(tee -a "$JOBLOG") 2>&1
+log "job=$JOB tag=$TAG args=[$ARGS] scenes=${RLP_SCENES:-synthetic} host=$(hostname) nproc=$(nproc)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || log "nvidia-smi unavailable"
+
+# ---- NAS upload ---------------------------------------------------------------------------
+NAS_OK=false
+if [ -n "${AIRLAB_STORAGE_USER:-}" ] && [ -n "${AIRLAB_STORAGE_PASS:-}" ]; then
+  command -v sshpass >/dev/null || { apt-get update -qq && apt-get install -y -qq sshpass rsync; }
+  NAS_OK=true
+fi
+NAS_HOST="${AIRLAB_STORAGE_HOST:-airlab-storage.andrew.cmu.edu}"
+STAGE=/tmp/rlp_stage; REL="$(basename "$NAS_DEST")/$TAG"
+mkdir -p "$STAGE/$REL"; ln -sfn "$ROOT/runs" "$STAGE/$REL/runs"
+nas_sync() {
+  $NAS_OK || return 0
+  local dest_parent; dest_parent="$(dirname "$NAS_DEST")"
+  ( cd "$STAGE" && SSHPASS="$AIRLAB_STORAGE_PASS" sshpass -e rsync -rltzRL --partial --timeout=900 \
+      --no-perms --no-owner --no-group --omit-dir-times \
+      --exclude '*.pt.tmp' \
+      -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+      "./$REL/runs/" "${AIRLAB_STORAGE_USER}@${NAS_HOST}:${dest_parent}/" ) \
+    && log "synced runs/ -> ${NAS_HOST}:${dest_parent}/${REL}/runs/" \
+    || log "WARN: NAS sync failed (rc=$?)"
+}
+$NAS_OK && log "NAS upload enabled -> ${NAS_HOST}:${NAS_DEST}/${TAG}/runs/" || log "NAS upload disabled (no airlab-storage credential)"
+
+# ---- environment ------------------------------------------------------------------------
+if ! command -v uv >/dev/null; then
+  log "installing uv"; curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+fi
+uv --version
+log "uv sync (torch cu128 from the lockfile)"
+uv sync --frozen --extra dev 2>&1 | tail -3 || { log "ERROR: uv sync failed"; nas_sync; exit 3; }
+GPU_OK=$(uv run python -c "import torch; print(int(torch.cuda.is_available()))" 2>/dev/null || echo 0)
+if [ "$GPU_OK" = "1" ]; then
+  uv run python -c "import torch; print('[rlp] torch', torch.__version__, 'cuda', torch.cuda.get_device_name(0))"
+elif [ "${RLP_ALLOW_CPU:-false}" = "true" ]; then
+  log "WARN: no CUDA device; continuing on CPU (RLP_ALLOW_CPU=true)"
+else
+  log "ERROR: torch.cuda.is_available() is False on this pod; set RLP_ALLOW_CPU=true to run on CPU"; nas_sync; exit 4
+fi
+
+# ---- scenes (deterministic; regenerated rather than shipped) ---------------------------------
+case "${RLP_SCENES:-synthetic}" in
+  *v1*) log "exporting v1 scenes"; uv run python scripts/export_scenes.py --preset earthquake tornado explosion --seeds 0:80 --region 400 400 --size-jitter 0.25 --casualties auto --bystanders auto --out data/scenes 2>&1 | tail -1 ;;
+esac
+case "${RLP_SCENES:-synthetic}" in
+  *v2*) log "exporting v2 scenes"; uv run python scripts/export_scenes.py --pipeline v2 --locale downtown --disaster earthquake tornado explosion --severity-range 0.5 1.0 --seeds 0:60 --region-range 500 1500 --size-jitter 0.25 --casualties auto --bystanders auto --out data/scenes_v2 2>&1 | tail -1 ;;
+esac
+
+# ---- job ----------------------------------------------------------------------------------
+WORKERS="${RLP_WORKERS:-auto}"; [ "$WORKERS" = "auto" ] && WORKERS=$(( $(nproc) - 2 ))
+case "$JOB" in
+  sweep|train|imitate) ARGS="$ARGS --workers $WORKERS" ;;
+esac
+( while true; do sleep "$(( SYNC_MIN * 60 ))"; nas_sync; done ) &
+SYNC_PID=$!
+log "running: uv run python scripts/${JOB}.py $ARGS"
+uv run python "scripts/${JOB}.py" $ARGS
+RC=$?
+log "job exited rc=$RC"
+kill $SYNC_PID 2>/dev/null
+nas_sync
+if [ "${RLP_KEEP_ALIVE:-false}" = "true" ]; then log "keep-alive: sleeping"; exec sleep infinity; fi
+exit $RC

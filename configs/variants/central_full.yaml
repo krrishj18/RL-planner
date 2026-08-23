@@ -1,0 +1,17 @@
+# 1. central_full — one shared team belief, full comms (the v0 reference).
+# Every robot sees the same map; the redundancy and revisit terms still apply, so the
+# comparison against the decentral variants is a comparison of *knowledge*, not of reward.
+notes: "shared team map, full comms"
+comms:
+  mode: full
+tokens:
+  local_size: 64
+  robot_bev_size: 0
+train:
+  use-local: true
+  use-bev: true
+  use-robot-bev: false
+  peers: true
+  # centralised execution: the sequential decode may mask a token a lower-index robot
+  # just claimed. Only this variant is allowed it (CONTRACTS.md 6).
+  sequential_decode: true

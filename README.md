@@ -1,0 +1,71 @@
+# RL-planner
+
+Proof-of-concept for RL-based planning/allocation of a multi-robot casualty-search team on
+procedurally generated 2.5D post-disaster scenes, with a simulated RayFronts semantic mapper.
+Background and design rationale: `../rl_scoping.md`. Component contracts: `CONTRACTS.md`.
+
+```
+src/rlplanner/scene   Scene JSON schema, 2.5D exporter (vendored generator code), casualty placement
+src/rlplanner/sim     raster, sensor/LoS, RayFronts emulation, tokens, env, baselines, metrics
+src/rlplanner/viz     scene/raster/episode rendering, recorder, interactive viewer
+src/rlplanner/train   policy, PPO/MAPPO, evaluation
+scripts/              CLIs (export_scenes, view_scene, play_episode, bench_env, run_baselines, train)
+tests/                pytest
+data/scenes/          exported scenes (git-ignored)
+runs/                 training/eval outputs (git-ignored)
+```
+
+```bash
+uv sync --extra dev
+uv run pytest -n auto                                   # ~500 tests, < 2 min
+
+# scenes: v1 (build_city, 400x400) or v2 (urban v2 layout, 500-1500 m non-square)
+uv run python scripts/export_scenes.py --preset earthquake tornado --seeds 0:20 --out data/scenes --size-jitter 0.25
+uv run python scripts/export_scenes.py --pipeline v2 --locale downtown --disaster earthquake tornado explosion \
+    --severity-range 0.5 1.0 --seeds 0:60 --region-range 500 1500 --size-jitter 0.25 --casualties auto --out data/scenes_v2
+uv run python scripts/view_scene.py data/scenes_v2/downtown_tornado_17.json --out runs/scene.png
+
+# simulator: baselines, bench, a rendered episode
+uv run python scripts/run_baselines.py --episodes 10
+uv run python scripts/bench_env.py
+uv run python scripts/play_episode.py --synthetic 3 --policy bt --robots 3 --out runs/ep_bt.mp4
+uv run python scripts/rayfronts_demo.py --synthetic 1 --out runs/rayfronts_demo.png
+
+# training / evaluation
+uv run python scripts/train.py --name run1 --scenes synthetic:0-200 --robots 3 --envs 32 --workers 10 --rollout 64 --updates 500
+uv run python scripts/eval_policy.py --policy runs/run1/latest.pt --scenes synthetic:0-200 --split heldout --episodes 24
+uv run python scripts/play_episode.py --synthetic 190 --policy ckpt:runs/run1/latest.pt --robots 3 --out runs/ep_trained.mp4
+```
+
+## Status (2026-08-21)
+
+The simulator emits exactly RayFronts' three raw outputs — persistent voxels (feature sum + hit count, no query grid),
+rays (per origin-cell × azimuth bin; never merged or triangulated; az/el + ground range from elevation), frontiers — and
+nothing else. It is **open-set**: nothing is ever scanned against a query list. Every token ends in the item's own
+feature embedding, the mission queries arrive as their own tokens with a weight each, and the policy learns relevance by
+attention. A casualty is *found* when its cell is voxel-observed with the human embedding ≥ 2 times. Hidden casualties
+(in cars, inside damaged buildings, under rubble) never appear in rays; only their container does.
+Tokens = raw items (32 frontiers, 32 rays, 32 feature segments, hold), newest first, plus up to 8 query tokens.
+~205 decisions/s on the bench scene (240×240 m, 3 robots) with the 64×64 ego crop on, 237 without it.
+
+Heuristic baselines on the new simulator (synthetic 240×240 m, 3 robots, 600 s, 20 episodes; finds by container =
+open · vehicle · building · rubble, of 2.9 · 1.75 · 2.95 · 4.4 present):
+
+| policy | fraction found | finds-AUC | time to first (s) | finds by container |
+|---|---|---|---|---|
+| random | 0.47 ± 0.18 | 0.27 | 108 | 2.15 · 0.90 · 1.10 · 1.45 |
+| nearest_frontier | 0.41 ± 0.15 | 0.28 | 75 | 2.70 · 0.95 · 0.80 · 0.50 |
+| segment_seeker | 0.03 ± 0.06 | 0.02 | 473 | 0.10 · 0.05 · 0.00 · 0.20 |
+| ray_follower | 0.49 ± 0.18 | 0.35 | 50 | 2.75 · 1.35 · 0.95 · 0.85 |
+| oracle (knows casualties) | 0.93 ± 0.12 | 0.77 | 29 | 2.85 · 1.75 · 2.35 · 4.15 |
+
+`segment_seeker` (argmax of the query cosine over segment tokens) livelocks: a segment is a persistent region of the
+map with no revisit suppression, so a threshold-free greedy pick keeps returning to the same neighbourhood and coverage
+stops at 0.09 against 0.98 for a plain sweep. Reported, not tuned away — moving on is what a learned policy is for.
+
+No policy has been trained on this simulator yet. The earlier result (`runs/syn_fixed/`, trained policy 0.80 found /
+0.61 AUC vs BT 0.67 / 0.55) was obtained on the previous simulator design and is kept only as evidence that the training
+pipeline learns.
+
+Viewing: `scripts/live_viewer.py` (live episode window), `scripts/sensor_inspector.py` (one drone: cone footprint, POV
+frame, per-cell embeddings), `scripts/view_scene.py`, `scripts/play_episode.py` + `scripts/episode_viewer.py`.

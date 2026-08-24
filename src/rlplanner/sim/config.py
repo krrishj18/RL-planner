@@ -100,6 +100,28 @@ class TokenConfig:
 
 
 @dataclass
+class QueryScheduleConfig:
+    """Training-side query churn (`rlplanner.llm.schedule.QueryScheduleSampler`).
+
+    Off by default: with `enabled = False` the env never touches the mission list and every
+    existing run reproduces bit-for-bit. Switched on, the env draws an initial subset of the pool
+    at `reset` and applies add/remove/reweight edits at decision boundaries through its own
+    `set_queries`, so a policy trained with it sees the query block move the way an LLM hint
+    would move it at evaluation time. No LLM is involved.
+    """
+    enabled: bool = False
+    every: int = 10               # decisions between edit draws (0 = only the initial subset)
+    p_edit: float = 0.5           # prob. an edit round changes anything
+    n_init_min: int = 1
+    n_init_max: int = 3
+    w_min: float = 0.3
+    w_max: float = 1.0
+    noise_std: float = 0.0        # per-dimension noise on a drawn query embedding (0 = exact)
+    pool: tuple[str, ...] = ()    # empty = every query the embedding table knows
+    max_queries: int = 0          # 0 = tokens.max_queries
+
+
+@dataclass
 class RewardConfig:
     casualty_reward: float = 1.0
     time_cost: float = 0.01           # per decision step (team)
@@ -175,6 +197,7 @@ class EnvConfig:
     decision_dt: float = 5.0
     t_max_s: float = 600.0
     comms: CommsConfig = field(default_factory=CommsConfig)   # "full" or per-robot + gossip
+    queries_dynamic: QueryScheduleConfig = field(default_factory=QueryScheduleConfig)
     record_events: bool = True
 
     def __post_init__(self) -> None:
@@ -256,6 +279,24 @@ class EnvConfig:
             e.append("tokens.k_visited must be >= 0")
         if self.tokens.robot_bev_size < 0:
             e.append("tokens.robot_bev_size must be >= 0")
+        qd = self.queries_dynamic
+        if qd.enabled:
+            if qd.every < 0:
+                e.append("queries_dynamic.every must be >= 0 (0 = initial subset only)")
+            if not (1 <= qd.n_init_min <= qd.n_init_max):
+                e.append("queries_dynamic needs 1 <= n_init_min <= n_init_max")
+            if qd.n_init_max > (qd.max_queries or self.tokens.max_queries):
+                e.append(f"queries_dynamic.n_init_max ({qd.n_init_max}) exceeds the query-token "
+                         f"capacity ({qd.max_queries or self.tokens.max_queries})")
+            if not (0.0 <= qd.p_edit <= 1.0):
+                e.append("queries_dynamic.p_edit in [0,1]")
+            if not (0.0 < qd.w_min <= qd.w_max):
+                e.append("queries_dynamic needs 0 < w_min <= w_max")
+            if qd.noise_std < 0:
+                e.append("queries_dynamic.noise_std must be >= 0")
+            if qd.max_queries < 0 or qd.max_queries > self.tokens.max_queries:
+                e.append(f"queries_dynamic.max_queries must be in [0, tokens.max_queries="
+                         f"{self.tokens.max_queries}]")
         if self.reward.revisit_m <= 0:
             e.append("reward.revisit_m must be > 0")
         return e
@@ -264,13 +305,15 @@ class EnvConfig:
         d = asdict(self)
         d["rayfronts"]["queries"] = list(self.rayfronts.queries)
         d["comms"]["range_choices"] = [float(x) for x in self.comms.range_choices]
+        d["queries_dynamic"]["pool"] = list(self.queries_dynamic.pool)
         return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "EnvConfig":
         d = dict(d)
         sub = {"raster": RasterConfig, "robot": RobotConfig, "sensor": SensorConfig,
-               "rayfronts": RayFrontsConfig, "tokens": TokenConfig, "reward": RewardConfig}
+               "rayfronts": RayFrontsConfig, "tokens": TokenConfig, "reward": RewardConfig,
+               "queries_dynamic": QueryScheduleConfig}
         if "comms" in d:
             d["comms"] = CommsConfig.coerce(d.pop("comms"))
         kw: dict[str, Any] = {}
@@ -279,6 +322,8 @@ class EnvConfig:
                 v = dict(d.pop(k))
                 if k == "rayfronts" and "queries" in v:
                     v["queries"] = tuple(v["queries"])
+                if k == "queries_dynamic" and "pool" in v:
+                    v["pool"] = tuple(v["pool"])
                 kw[k] = klass(**v)
         kw.update(d)
         return cls(**kw)

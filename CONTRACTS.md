@@ -376,6 +376,32 @@ arrays; `train/par_env.py` ships the same fields (`_OBS_FIELDS`). `ObsBatch` mir
 `set_queries` never changes an array shape, so envs sharing a config need not switch together and a
 checkpoint keeps loading.
 
+## 6.1 Query hints and query churn (owner: llm, `rlplanner/llm/`)
+The mission query list is an *input*, so something may edit it while an episode runs. Two users of
+that, both going through `DisasterEnv.set_queries` and nothing else:
+
+- **`EnvConfig.queries_dynamic`** (`QueryScheduleConfig`, **default `enabled = False`**) — training
+  robustness, no LLM. `llm/schedule.py: QueryScheduleSampler` draws an initial subset of a query
+  pool at `reset` and applies one add/remove/reweight edit every `every` decisions with probability
+  `p_edit`; `noise_std > 0` registers a jittered copy of a pool query in the embedding table's bank
+  under a name hashed from its vector (so two envs sharing the cached table can never give one name
+  two meanings). It is a function of `np.random.default_rng([env.seed, …])`, so a seed fixes the
+  whole schedule. Off, `DisasterEnv` never calls it and every run reproduces bit-for-bit.
+- **`llm/hint_agent.py: HintAgent` + `HintController`** — the closed loop. `digest.py` turns the
+  live belief into a length-capped text digest (new-this-interval rays and segments summarised by
+  **nearest-class decode**, coverage, casualties found by container, the current list with its
+  weights); the agent returns `{add, remove, reweight}` over query *strings*; `embed.py` turns a
+  string into a unit `[D]` vector (a least-squares SigLIP→sim projection when a text tower is
+  installed, otherwise a lexicon of the class prompts and the query bank with the prompt
+  constrained to it) and registers it in `EmbeddingTable.bank`, which is what makes
+  `set_queries(("crushed vehicle", …))` legal. The decode is **for the LLM's eyes only** — the
+  policy still receives raw `feat[D]`. The agent never picks a target, a waypoint or a token, and
+  any backend failure (missing CLI, timeout, non-zero exit, unparseable output) returns no-op edits
+  and a warning; it never raises into an episode. The active list is capped at `tokens.max_queries`.
+- `scripts/llm_hints_eval.py` evaluates one policy under `none` (the query block zeroed on the
+  observation handed to the policy) / `static` / `llm` / `scripted`, prints the `train/evaluate.py`
+  table and writes the query-edit log to CSV + JSONL.
+
 ## 7. Baselines (owner: sim, `sim/baselines.py`)
 `Policy.act(obs: TeamObs, state: EnvState | None) -> np.ndarray[int]`; `privileged: bool`. Simple
 heuristics, one line of arbitration each and **no threshold** — deliberately not a behaviour tree, so

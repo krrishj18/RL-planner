@@ -458,6 +458,9 @@ query tokens); the environment scores nothing.
   matching picks which ones. More robots than casualties: the matching leaves robots over and each
   takes the oracle's own no-claim line, its nearest unfound casualty. Deterministic.
 
+**Privileged rows evaluate under `instant_confirm`** (`sim/config.py`): `found_hits=1`, `p_observe=1` for every visibility. The stochastic hit model emulates RayFronts confirmation and binds policies and heuristics; an oracle row bounds *planning* with perfect knowledge, so arrival confirms.
+
+
 ## 8. Metrics (owner: sim, `sim/metrics.py`)
 Per episode: `time_to_first`, `time_to_half`, `time_to_all` (t_max if not reached), `finds_auc`
 (normalised area under fraction-found vs t/t_max), `frac_found`, `n_found`, `dist_per_find`,

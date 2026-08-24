@@ -514,3 +514,30 @@ def test_oracle_assign_does_not_thrash_with_one_robot_and_many_casualties():
             break
     switches = sum(1 for i in range(1, len(goals)) if goals[i] != goals[i - 1])
     assert len(goals) > 40 and switches < len(goals) / 4
+
+
+# ---- instant confirm for privileged rows -------------------------------------------------------
+def test_instant_confirm_overrides_perception():
+    from rlplanner.sim.config import EnvConfig, instant_confirm
+    cfg = EnvConfig()
+    c = instant_confirm(cfg)
+    assert c.rayfronts.found_hits == 1
+    assert all(v == 1.0 for v in c.rayfronts.p_observe_base.values())
+    assert c.rayfronts.far_observe_factor == 1.0
+    assert cfg.rayfronts.found_hits == 2, "original untouched"
+
+
+def test_privileged_episodes_confirm_on_arrival_where_stochastic_never_could():
+    """With p_observe forced to 0 nothing is ever found -- except by a privileged row, whose
+    episode runs under `instant_confirm` (the oracle bounds planning, not perception)."""
+    from rlplanner.sim.config import EnvConfig
+    from rlplanner.train.par_env import _run_episodes
+    from rlplanner.train.scenes import SceneBank
+    cfg = EnvConfig()
+    cfg.rayfronts.p_observe_base = {k: 0.0 for k in cfg.rayfronts.p_observe_base}
+    bank = SceneBank("synthetic:0-2", region_m=(200.0, 200.0))
+    key = bank.split("train")[0]
+    blind = _run_episodes(bank, cfg, "ray_follower", [(key, 0)], 2, max_decisions=40)
+    assert blind[0]["frac_found"] == 0.0
+    seen = _run_episodes(bank, cfg, "oracle", [(key, 0)], 2, max_decisions=40)
+    assert seen[0]["frac_found"] > 0.0

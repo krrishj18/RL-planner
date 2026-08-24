@@ -334,3 +334,17 @@ class EnvConfig:
 
     def to_yaml(self, path: str | Path) -> None:
         Path(path).write_text(yaml.safe_dump(self.to_dict(), sort_keys=False))
+
+
+def instant_confirm(cfg: EnvConfig) -> "EnvConfig":
+    """Eval config for privileged baselines: arrival confirms on the first look.
+
+    The stochastic hit model emulates RayFronts confirmation; an oracle row bounds *planning*
+    with perfect knowledge, so perception noise is not part of its bound.
+    """
+    import copy
+    c = copy.deepcopy(cfg)
+    c.rayfronts.found_hits = 1
+    c.rayfronts.p_observe_base = {k: 1.0 for k in c.rayfronts.p_observe_base}
+    c.rayfronts.far_observe_factor = 1.0
+    return c

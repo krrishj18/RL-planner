@@ -24,7 +24,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from ..sim.config import EnvConfig
+from ..sim.config import EnvConfig, instant_confirm
 from ..sim.vec_env import VecObs
 from .scenes import AUTO, DEFAULT_REGION, T_MAX_MAX_S, SceneBank, SceneKey
 
@@ -444,12 +444,14 @@ def _run_episodes(bank: SceneBank, cfg: EnvConfig, name: str, tasks, n_robots: i
     rows = []
     for key, seed in tasks:
         n_rob, tm = bank.env_params(key, n_robots, cfg.t_max_s if t_max is None else t_max)
+        pol = make_any(_BASELINE_ALIAS.get(name, name), queries=cfg.rayfronts.queries,
+                       seed=int(seed))
         ecfg = copy.deepcopy(cfg)
+        if getattr(pol, "privileged", False):
+            ecfg = instant_confirm(ecfg)     # oracles bound planning, not perception
         ecfg.robot.n_robots = int(n_rob)
         ecfg.t_max_s = float(tm)
         env = bank.make_env(key, ecfg, int(seed))
-        pol = make_any(_BASELINE_ALIAS.get(name, name), queries=cfg.rayfronts.queries,
-                       seed=int(seed))
         row = run_episode(env, pol, int(seed), max_decisions)
         row.update({"scene": str(key), "area_km2": bank.area(key), "bucket": bank.bucket(key),
                     "disaster": bank.disaster(key), "n_robots": int(n_rob), "t_max": float(tm)})

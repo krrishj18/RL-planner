@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from ..sim import baselines
-from ..sim.config import EnvConfig
+from ..sim.config import EnvConfig, instant_confirm
 from ..sim.state import TeamObs
 from .obs import ObsBatch
 from .par_env import default_workers, make_vec_env, run_episode
@@ -165,6 +165,8 @@ def evaluate_policy(actor, bank: SceneBank, cfg: EnvConfig, episodes: int = 8,
             for k, s in tasks:
                 nr, tm = bank.env_params(k, robots, cfg.t_max_s if t_max is None else t_max)
                 ecfg = copy.deepcopy(cfg)
+                if getattr(actor, "privileged", False):
+                    ecfg = instant_confirm(ecfg)     # oracles bound planning, not perception
                 ecfg.robot.n_robots = int(nr)
                 ecfg.t_max_s = float(tm)
                 row = run_episode(bank.make_env(k, ecfg, s), actor, s, max_decisions)

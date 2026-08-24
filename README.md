@@ -43,8 +43,10 @@ uv run python scripts/play_episode.py --synthetic 190 --policy ckpt:runs/run1/la
 privileged `oracle_sweep` teacher (144k labels) then PPO fine-tune (`scripts/warmstart.sh`) beats the best heuristic
 in-distribution — central 0.68 ± 0.06 found / 0.47 ± 0.04 AUC and decentral 0.62 ± 0.05 / 0.44 ± 0.04 vs
 `ray_follower` 0.56 / 0.38 (central) and 0.63 / 0.41 (decentral); PPO also repairs pure imitation's behaviour
-(reward −24 → +3.5). **Zero-shot transfer to the v2 downtown set fails** (0.06 found vs nearest-frontier 0.15) —
-training on the v2 distribution itself is running (`ws_v2_central`). PPO-from-scratch plateaus at the heuristic level
+(reward −24 → +3.5). **Zero-shot transfer to the v2 downtown set fails** (0.06 found vs nearest-frontier 0.15), but trained *on* the
+v2 distribution (`ws_v2_central`: DAgger 345k labels → PPO 200 updates) the policy becomes the **best method at
+city scale**: 0.19 ± 0.03 found / 0.11 AUC vs nearest-frontier 0.15 ± 0.03 / 0.08, ray_follower 0.11 / 0.06 — and
+it beats the greedy *privileged* oracle (0.14, reward −256), which collapses by beelining at this scale. PPO-from-scratch plateaus at the heuristic level
 (0.52–0.55 / 0.38); the 7-variant sweep (OSMO) found: reward penalties cost ~0.06–0.10 found (noreward 0.66–0.67 leads every
 comms setting), decentral ≈ central, blackout ≈ −0.05, rays are the sharing payload that matters, and
 noreward PPO-from-scratch matches the warm-start on synthetic (see DESIGN_VARIANTS.md §H2).

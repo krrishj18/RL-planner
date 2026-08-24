@@ -184,3 +184,17 @@ the blackout a radio it never had, so its `own` row is the one that describes th
 trained. At every range each variant keeps **its own payload flags** — `share_rays` never receives
 coverage, `share_pos_cov` never receives rays or visited records, the blackout receives nothing
 after spawn — and every row is scored with the default reward.
+
+
+## H2. Sweep results (OSMO, 2026-08-24 — 7 variants × 300 PPO updates, synthetic, 16 held-out episodes/cell)
+
+found @ comms range 100 / 200 / ∞ / own: central_full .57/.58/.58/.54 · share_all .56/.61/.60/.56 ·
+pos_cov .56/.50/.55/.46 · share_rays .60/.60/.59/.63 · blackout .55/.50/.54/.53 ·
+**share_all_noreward .67/.66/.66/.67** · tokens_only .57/.57/.54/.57. CI ≈ ±0.06/cell.
+
+Findings: (1) the redundancy/revisit penalties cost ~0.06–0.10 found under a common yardstick — decide:
+keep (deployment semantics), shrink (revisit 0.5 → 0.1), or refunds-only; (2) decentral ≈ central; blackout
+only ~-0.05; (3) rays are the payload that matters (share_rays ≈ share_all > pos_cov); (4) dense inputs worth
+a few points (tokens_only lowest of the share-all family); (5) noreward PPO-from-scratch (0.67) ≈ warm-start
+(0.68) on synthetic — the earlier from-scratch plateau was partly the penalty terms.
+Full tables with CI/AUC: /volume4/dsta/rl-planner/sweep_v2/runs/**/summary.md.

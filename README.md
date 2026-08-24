@@ -37,6 +37,20 @@ uv run python scripts/eval_policy.py --policy runs/run1/latest.pt --scenes synth
 uv run python scripts/play_episode.py --synthetic 190 --policy ckpt:runs/run1/latest.pt --robots 3 --out runs/ep_trained.mp4
 ```
 
+## Status (2026-08-24)
+
+**Warm-start results (OSMO GPU, held-out synthetic 240×240 m, 24 episodes, sampled decode):** DAgger from the
+privileged `oracle_sweep` teacher (144k labels) then PPO fine-tune (`scripts/warmstart.sh`) beats the best heuristic
+in-distribution — central 0.68 ± 0.06 found / 0.47 ± 0.04 AUC and decentral 0.62 ± 0.05 / 0.44 ± 0.04 vs
+`ray_follower` 0.56 / 0.38 (central) and 0.63 / 0.41 (decentral); PPO also repairs pure imitation's behaviour
+(reward −24 → +3.5). **Zero-shot transfer to the v2 downtown set fails** (0.06 found vs nearest-frontier 0.15) —
+training on the v2 distribution itself is running (`ws_v2_central`). PPO-from-scratch plateaus at the heuristic level
+(0.52–0.55 / 0.38); the 7-variant sharing/reward sweep is running on OSMO.
+
+**OSMO:** `osmo/submit.sh --job {train,sweep,imitate,warmstart,eval_v2,...} --tag T --args "…" [--scenes v1|v2]
+[--fetch prior_tag] [--env K=V]` — pods clone this repo, `uv sync`, regenerate scenes, run on a pool GPU and rsync
+`runs/` to `/volume4/dsta/rl-planner/<tag>/runs/` every 10 min (credential: `airlab-storage`).
+
 ## Status (2026-08-21)
 
 The simulator emits exactly RayFronts' three raw outputs — persistent voxels (feature sum + hit count, no query grid),

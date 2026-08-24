@@ -230,3 +230,10 @@ teammate may have swept a debris pile and confirmed nothing, and going back is s
 returning to a *confirmed* find is unambiguously wasteful. `revisit_refund_on_find` stays as the
 backstop for multi-casualty piles near a confirmed find. The gossip merge already prefers the
 higher-`n_found` copy of a record, so confirmation propagates with the records themselves.
+
+**Outcome** (`ws_v2_central2`, 36 CPU / 1 GPU, 63 min wall): BC 0.16 sampled (vs 0.12–0.13 under the
+old rule), FT **0.21 ± 0.03 found / 0.12 AUC, reward +8.3** at update 200 vs 0.19 ± 0.03 / 0.11 / +7.8
+before — found overlaps the 12-episode CI but the whole trajectory is stronger (the old final 0.19 was
+matched by update 100). The greedy oracle's reward moves −256 → +0.9: its returns to unconfirmed
+targets are search, not waste, and are no longer charged. Final 24-episode greedy/sampled CSVs:
+`/volume4/dsta/rl-planner/ws_v2_central2/runs/ws_central_full/{bc,ft}/`.

@@ -46,7 +46,10 @@ in-distribution — central 0.68 ± 0.06 found / 0.47 ± 0.04 AUC and decentral 
 (reward −24 → +3.5). **Zero-shot transfer to the v2 downtown set fails** (0.06 found vs nearest-frontier 0.15), but trained *on* the
 v2 distribution (`ws_v2_central`: DAgger 345k labels → PPO 200 updates) the policy becomes the **best method at
 city scale**: 0.19 ± 0.03 found / 0.11 AUC vs nearest-frontier 0.15 ± 0.03 / 0.08, ray_follower 0.11 / 0.06 — and
-it beats the greedy *privileged* oracle (0.14, reward −256), which collapses by beelining at this scale. PPO-from-scratch plateaus at the heuristic level
+it beats the greedy *privileged* oracle (0.14, reward −256), which collapses by beelining at this scale.
+With the revisit penalty scoped to confirmed targets (`ws_v2_central2`, DESIGN_VARIANTS §H4) the same
+recipe reaches **0.21 ± 0.03 / 0.12, reward +8.3** — and the greedy oracle's reward flips −256 → +0.9,
+confirming the penalty now charges only true waste. PPO-from-scratch plateaus at the heuristic level
 (0.52–0.55 / 0.38); the 7-variant sweep (OSMO) found: reward penalties cost ~0.06–0.10 found (noreward 0.66–0.67 leads every
 comms setting), decentral ≈ central, blackout ≈ −0.05, rays are the sharing payload that matters, and
 noreward PPO-from-scratch matches the warm-start on synthetic (see DESIGN_VARIANTS.md §H2).

@@ -66,8 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--scene", help="scene.json")
     src.add_argument("--synthetic", type=int, metavar="SEED")
     ap.add_argument("--policy", default="nearest_frontier",
-                    help="a sim.baselines name (random|nearest_frontier|ray_follower|"
-                         "segment_seeker|oracle), or ckpt:<path.pt> / ckpt:latest with --run")
+                    help="a sim.baselines name (random|nearest_frontier|lawnmower|ray_follower|"
+                         "segment_seeker|oracle|oracle_assign), or ckpt:<path.pt> / ckpt:latest "
+                         "with --run")
     ap.add_argument("--run", default=None, help="run name under runs/ for --policy ckpt:latest")
     ap.add_argument("--device", default="auto", help="torch device for a ckpt: policy")
     ap.add_argument("--robots", default="auto", metavar="N|auto",

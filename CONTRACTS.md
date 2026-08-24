@@ -397,9 +397,36 @@ query tokens); the environment scores nothing.
 - `RayFollowerPolicy` ("ray_follower"): argmax of `query_scores` over the ray tokens; if no ray token
   is on offer, nearest frontier.
 - `SegmentSeekerPolicy` ("segment_seeker"): the same over the segment tokens.
+- `LawnmowerPolicy` ("lawnmower"): boustrophedon coverage that breaks off for a person it sees.
+  The region is cut into `n_robots` contiguous horizontal bands, robot `r` owning band `r`; inside
+  its band the robot follows a fixed serpentine order (lanes one sensor swath tall, +x on an even
+  lane, -x on an odd one) and the action is **the in-band frontier with the smallest sweep key**.
+  There is no sweep cursor: frontiers vanish as the ground behind them is mapped, so the smallest
+  remaining key *is* the next unswept point and an interrupted sweep resumes instead of restarting.
+  A frontier the robot has effectively reached sorts last (the `min_travel` guard, folded into the
+  key); an empty band falls back to the nearest frontier anywhere; only a robot with no frontier
+  holds. Bands are disjoint, so the position claims only bite on that fallback, and the whole thing
+  runs on the robot's own view — unchanged under range comms and for any `n_robots >= 1`.
+  **Investigate**: a live ray whose feature *is* a person diverts the robot, classified
+  threshold-free as the argmax cosine of the ray token's `feat` over the **whole class-embedding
+  set** (a human ray iff the argmax is `human_standing`/`human_prone`; no score meets a cutoff and
+  no mission query is read, which would make the divert a function of the word list). The nearest
+  such ray wins and the robot stays on it until the ray resolves or its target falls inside the
+  `min_travel` guard, then the sweep resumes at its next waypoint. Only rays divert: only an
+  `open`-visibility human raises a far-field human ray (4), so a casualty in a car, a building or
+  under rubble is a `vehicle_toppled`/`building_damaged`/`debris` ray this baseline sweeps past —
+  the gap a learned policy has to close. Segments do not divert either: at `segment_scale = 40` a
+  body is absorbed by its neighbours and a persistent region with no resolution rule livelocks (12).
 - `OraclePolicy(privileged)`: holds while an unfound casualty is inside the camera within the depth
   limit (finding is by hit count, so dwelling is the productive action), else the token closest to
-  the nearest unfound casualty.
+  the nearest unfound casualty — claimed greedily, nearest-first, in robot-index order.
+- `OracleAssignPolicy(privileged)` ("oracle_assign"): `OraclePolicy` with the greedy claim replaced
+  by the **optimal** assignment — `scipy.optimize.linear_sum_assignment` over the robots x unfound
+  casualties straight-line distance matrix, re-solved from scratch every decision as casualties are
+  found (`baselines.assign_casualties`). Same dwell rule, same mechanical channel to a casualty, so
+  a row against `oracle` isolates the assignment and nothing else. More casualties than robots: the
+  matching picks which ones. More robots than casualties: the matching leaves robots over and each
+  takes the oracle's own no-claim line, its nearest unfound casualty. Deterministic.
 
 ## 8. Metrics (owner: sim, `sim/metrics.py`)
 Per episode: `time_to_first`, `time_to_half`, `time_to_all` (t_max if not reached), `finds_auc`

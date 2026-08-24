@@ -19,7 +19,7 @@ from rlplanner.sim.config import EnvConfig
 from rlplanner.train.evaluate import (EVAL_COLS, EVAL_META, by_bucket, evaluate_policy,
                                       format_table, make_actor, meta_arrays, summarise,
                                       write_csv, write_episode_csv)
-from rlplanner.train.scenes import AUTO, SceneBank, parse_robots, parse_t_max
+from rlplanner.train.scenes import AUTO, T_MAX_MAX_S, SceneBank, parse_robots, parse_t_max
 
 
 def _load_cfg(a) -> EnvConfig:
@@ -51,8 +51,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--policy", action="append", required=True,
-                    help="baseline name (random|nearest|ray_follower|segment_seeker|oracle) "
-                         "or a checkpoint path; repeatable")
+                    help="baseline name (random|nearest|lawnmower|ray_follower|segment_seeker|"
+                         "oracle|oracle_assign) or a checkpoint path; repeatable")
     ap.add_argument("--scenes", default="synthetic:0-200", nargs="+",
                     help="synthetic:A-B or scene-json globs/paths (unquoted shell glob is fine)")
     ap.add_argument("--split", default="heldout", choices=("heldout", "train", "all"))
@@ -60,8 +60,11 @@ def main(argv=None) -> int:
     ap.add_argument("--robots", default="3",
                     help="N or 'auto' (clip(round(3*sqrt(area_km2/0.16)), 3, 8) per scene)")
     ap.add_argument("--t-max", default=None,
-                    help="seconds or 'auto' (clip(600*sqrt(area_km2/0.16), 600, 1500) per scene); "
+                    help="seconds or 'auto' (clip(600*sqrt(area_km2/0.16), 600, cap) per scene); "
                          "default = the EnvConfig value")
+    ap.add_argument("--t-max-cap", type=float, default=T_MAX_MAX_S,
+                    help=f"upper clip of the area-scaled t_max in seconds (default "
+                         f"{T_MAX_MAX_S:.0f}); only bites with --t-max auto")
     ap.add_argument("--seed", type=int, default=10_000)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--out", default=None, help="CSV path (default runs/eval_<stamp>.csv)")
@@ -85,7 +88,7 @@ def main(argv=None) -> int:
     cfg = _load_cfg(a)
     lo, _ = parse_robots(a.robots)
     t_spec = parse_t_max(a.t_max)
-    bank = SceneBank(a.scenes)
+    bank = SceneBank(a.scenes, t_max_cap=a.t_max_cap)
     cfg.robot.n_robots = bank.robot_bounds((lo, lo), a.split)[0]
     if t_spec > 0:
         cfg.t_max_s = float(t_spec)
@@ -123,6 +126,7 @@ def main(argv=None) -> int:
     write_csv(out, rows, EVAL_COLS + EVAL_META,
               extra={"episodes": a.episodes, "robots": rob, "split": a.split,
                      "scenes": a.scenes, "t_max": "auto" if t_max is not None else cfg.t_max_s,
+                     "t_max_cap": bank.t_max_cap,
                      "comms": cfg.comms.mode, "comms_range_m": cfg.comms.range_m,
                      "variant": a.variant or ""})
     print(f"[eval_policy] wrote {out} and {ep_out}")

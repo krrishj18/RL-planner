@@ -26,8 +26,8 @@ from rlplanner.train.par_env import default_workers, make_vec_env
 from rlplanner.train.policy import TokenPolicy
 from rlplanner.train.ppo import PPO, PPOConfig, bc_reference
 from rlplanner.train.rollout import Collector
-from rlplanner.train.scenes import (AUTO, SceneBank, auto_robots, auto_t_max, parse_robots,
-                                    parse_scene_mix, parse_t_max)
+from rlplanner.train.scenes import (AUTO, T_MAX_MAX_S, SceneBank, auto_robots, auto_t_max,
+                                    parse_robots, parse_scene_mix, parse_t_max)
 
 LOG_COLS = ("update", "env_steps", "decisions", "ep_reward", "frac_found", "episodes",
             "policy_loss", "value_loss", "entropy", "approx_kl", "clipfrac",
@@ -52,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--t-max", default=None,
                     help="episode horizon in seconds, or 'auto' (area rule: "
                          "clip(600*sqrt(area_km2/0.16), 600, 1500)); default = the EnvConfig value")
+    ap.add_argument("--t-max-cap", type=float, default=T_MAX_MAX_S,
+                    help=f"upper clip of the area-scaled t_max in seconds (default "
+                         f"{T_MAX_MAX_S:.0f}); only bites with --t-max auto")
     ap.add_argument("--scene-mix", default=None,
                     help="sampling weights over the bank's area terciles, e.g. "
                          "'small:0.5,medium:0.3,large:0.2' (default: uniform over scenes)")
@@ -187,9 +190,9 @@ def pick_device(spec: str) -> torch.device:
 def curve(out: Path, log: list[dict], evals: list[dict], base: dict) -> None:
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 2, figsize=(11, 7.5))
-    colors = {"random": "tab:gray", "nearest": "tab:green", "ray_follower": "tab:orange",
-              "segment_seeker": "tab:purple",
-              "oracle": "tab:red"}
+    colors = {"random": "tab:gray", "nearest": "tab:green", "lawnmower": "tab:brown",
+              "ray_follower": "tab:orange", "segment_seeker": "tab:purple",
+              "oracle": "tab:red", "oracle_assign": "tab:pink"}
     for ax, (key, title) in zip(axes.ravel(), CURVE_PANELS):
         if key == "reward":
             tr = [(r["decisions"], r["ep_reward"]) for r in log
@@ -255,7 +258,7 @@ def main(argv=None) -> int:
     lo, hi = parse_robots(a.robots)
     t_spec = parse_t_max(a.t_max)
     mix = parse_scene_mix(a.scene_mix)
-    bank = SceneBank(a.scenes)
+    bank = SceneBank(a.scenes, t_max_cap=a.t_max_cap)
     rlo, rhi = bank.robot_bounds((lo, hi))
     cfg.robot.n_robots = rlo                     # per-env override happens at env construction
     if t_spec > 0:
@@ -273,7 +276,7 @@ def main(argv=None) -> int:
     workers = int(a.workers or default_workers(a.envs))
     vec = make_vec_env(a.env_backend, a.scenes, cfg, a.envs, robots=(lo, hi), split="train",
                        seed=a.seed, n_workers=workers, send_bev=a.use_bev, t_max=vec_t_max,
-                       scene_mix=mix)
+                       scene_mix=mix, t_max_cap=a.t_max_cap)
     try:
         return _train(a, ap, run, cfg, bank, vec, dev, lo, hi, workers, vec_t_max, rlo, rhi, init)
     finally:
@@ -286,7 +289,8 @@ def _resolved(bank: SceneBank, a, lo: int, hi: int, rlo: int, rhi: int, tlo: flo
     areas = sorted(bank.area(k) for k in bank.keys)
     return {
         "rule": "n_robots = clip(round(3*sqrt(area_km2/0.16)), 3, 8); "
-                "t_max_s = clip(600*sqrt(area_km2/0.16), 600, 1500)",
+                f"t_max_s = clip(600*sqrt(area_km2/0.16), 600, {bank.t_max_cap:.0f})",
+        "t_max_cap": float(bank.t_max_cap),      # the effective cap, not the raw flag
         "robots": "auto" if lo <= 0 else [lo, hi], "robots_range": [rlo, rhi],
         "t_max": "auto" if a.t_max and str(a.t_max).lower() == "auto" else a.t_max,
         "t_max_range": [round(tlo, 1), round(thi, 1)],
@@ -298,7 +302,7 @@ def _resolved(bank: SceneBank, a, lo: int, hi: int, rlo: int, rhi: int, tlo: flo
         "buckets_heldout": bank.bucket_counts("heldout"),
         "scene_mix": mix,
         "per_bucket_example": {b: {"area_km2": round(x, 4), "n_robots": auto_robots(x),
-                                   "t_max_s": round(auto_t_max(x), 1)}
+                                   "t_max_s": round(auto_t_max(x, bank.t_max_cap), 1)}
                                for b, x in _bucket_examples(bank).items()},
     }
 

@@ -8,7 +8,7 @@ Area scaling (`--robots auto`, `--t-max auto`), applied per scene at env constru
 
     s          = sqrt(area_km2 / 0.16)              # 0.16 km2 = the 400 x 400 m reference
     n_robots   = clip(round(3 * s), 3, 8)           # ties round down
-    t_max_s    = clip(600 * s, 600, 1500)
+    t_max_s    = clip(600 * s, 600, cap)            # cap = --t-max-cap, default 1500
 
     400x400 m  -> 3 robots /  600 s      (s = 1.0)
     1000x1000  -> 7 robots / 1500 s      (s = 2.5, 7.5 robots -> 7)
@@ -16,6 +16,9 @@ Area scaling (`--robots auto`, `--t-max auto`), applied per scene at env constru
 
 A 3-robot team at 600 s sweeps ~58k m2, so both the team and the clock grow with the linear
 extent of the region, not its area: doubling the side doubles robots and time until the caps bite.
+The horizon cap is the one knob of the rule a run may move (`--t-max-cap`, `SceneBank.t_max_cap`):
+1500 s stops a 1500 x 1500 m scene at the same clock as a 1000 x 1000 m one, so a long-episode
+study raises it without touching `--t-max`, which overrides the rule outright.
 
 Size buckets are the area terciles of the bank (`small`/`medium`/`large`, by value, so a bank of
 equal-area scenes is a single bucket); they drive `--scene-mix` sampling and the stratified
@@ -77,10 +80,11 @@ def auto_robots(area_km2: float) -> int:
     return int(min(max(n, ROBOTS_MIN), ROBOTS_MAX))
 
 
-def auto_t_max(area_km2: float) -> float:
-    """clip(600 * s, 600, 1500) seconds."""
+def auto_t_max(area_km2: float, cap: float = T_MAX_MAX_S) -> float:
+    """clip(600 * s, 600, cap) seconds; `cap` defaults to the shipped 1500 s."""
+    c = float(cap) if float(cap) > 0 else T_MAX_MAX_S
     t = REF_T_MAX_S * area_scale(area_km2)
-    return float(min(max(t, T_MAX_MIN_S), T_MAX_MAX_S))
+    return float(min(max(t, T_MAX_MIN_S), max(c, T_MAX_MIN_S)))
 
 
 def region_area_km2(region_m: Sequence[float]) -> float:
@@ -242,9 +246,13 @@ class SceneBank:
     RASTER_CACHE_CELLS = 4_000_000    # rasters are ~13 bytes/cell: ~50 MB
 
     def __init__(self, spec: str, region_m: Sequence[float] = DEFAULT_REGION,
-                 holdout_frac: float = 0.1):
+                 holdout_frac: float = 0.1, t_max_cap: float = T_MAX_MAX_S):
         self.spec = str(spec)
         self.holdout_frac = float(holdout_frac)
+        c = float(t_max_cap)
+        # the *effective* cap: `auto_t_max` clamps it to the floor and reads non-positive as the
+        # default, so a run that records `bank.t_max_cap` records the horizon it actually ran
+        self.t_max_cap = max(c, T_MAX_MIN_S) if c > 0 else T_MAX_MAX_S
         self.keys = parse_scenes(spec)
         self.region_m = (float(region_m[0]), float(region_m[1]))
         self.metas = {k: self._meta(k) for k in self.keys}
@@ -284,7 +292,7 @@ class SceneBank:
         """Resolve (n_robots, t_max_s) for one scene; non-positive arguments mean 'auto'."""
         a = self.area(key)
         nr = auto_robots(a) if int(n_robots) <= 0 else int(n_robots)
-        tm = auto_t_max(a) if float(t_max) <= 0 else float(t_max)
+        tm = auto_t_max(a, self.t_max_cap) if float(t_max) <= 0 else float(t_max)
         return int(nr), float(tm)
 
     def robot_bounds(self, robots: tuple[int, int], split: str = "all") -> tuple[int, int]:
@@ -297,7 +305,8 @@ class SceneBank:
     def t_max_bounds(self, t_max: float = AUTO, split: str = "all") -> tuple[float, float]:
         if float(t_max) > 0:
             return (float(t_max), float(t_max))
-        v = [auto_t_max(self.area(k)) for k in self.split(split)] or [T_MAX_MIN_S]
+        v = [auto_t_max(self.area(k), self.t_max_cap) for k in self.split(split)] \
+            or [T_MAX_MIN_S]
         return (min(v), max(v))
 
     # -- split -----------------------------------------------------------------------------
@@ -405,4 +414,5 @@ def _trim(cache: dict, budget: int, size, keep_last: bool = True) -> None:
 
 __all__ = ["SceneBank", "SceneKey", "SceneMeta", "parse_scenes", "parse_robots", "parse_t_max",
            "parse_scene_mix", "read_scene_meta", "area_scale", "auto_robots", "auto_t_max",
-           "region_area_km2", "DEFAULT_REGION", "AUTO", "BUCKETS", "REF_AREA_KM2"]
+           "region_area_km2", "DEFAULT_REGION", "AUTO", "BUCKETS", "REF_AREA_KM2",
+           "T_MAX_MIN_S", "T_MAX_MAX_S", "ROBOTS_MIN", "ROBOTS_MAX"]

@@ -30,8 +30,9 @@ EVAL_COLS = ("frac_found", "finds_auc", "time_to_first", "time_to_half", "time_t
              "intentional_revisits", "link_frac")
 EVAL_META = ("area_km2", "n_robots", "t_max")     # per-scene columns of the area-scaling rule
 EPISODE_COLS = ("policy", "scene", "disaster", "bucket") + EVAL_META + ("length",) + EVAL_COLS
-BASELINES = ("random", "nearest", "ray_follower", "segment_seeker", "oracle")
-HEURISTICS = ("random", "nearest", "ray_follower", "segment_seeker")
+HEURISTICS = ("random", "nearest", "lawnmower", "ray_follower", "segment_seeker")
+PRIVILEGED = ("oracle", "oracle_assign")
+BASELINES = HEURISTICS + PRIVILEGED
 _BASELINE_ALIAS = {"nearest": "nearest_frontier"}
 Z95 = 1.96
 
@@ -112,7 +113,8 @@ def _pool_for(bank: SceneBank, cfg: EnvConfig, episodes: int, robots: int, split
         backend = "subproc" if w > 1 and episodes >= 4 else "serial"
     return make_vec_env(backend, bank.spec, cfg, n_envs=w, robots=(robots, robots), split=split,
                         seed=seed, n_workers=w, send_bev=use_bev, region_m=bank.region_m,
-                        holdout_frac=bank.holdout_frac, t_max=t_max)
+                        holdout_frac=bank.holdout_frac, t_max=t_max,
+                        t_max_cap=bank.t_max_cap)
 
 
 def _actor_rows(pool, actor: TorchActor, tasks, robots: int,
@@ -292,7 +294,8 @@ def append_csv(path: str | Path, row: dict[str, Any]) -> None:
         wr.writerow(row)
 
 
-__all__ = ["EVAL_COLS", "EVAL_META", "EPISODE_COLS", "BASELINES", "HEURISTICS", "Stat", "TorchActor",
+__all__ = ["EVAL_COLS", "EVAL_META", "EPISODE_COLS", "BASELINES", "HEURISTICS", "PRIVILEGED",
+           "Stat", "TorchActor",
            "make_actor", "load_checkpoint", "run_episode", "eval_tasks", "evaluate_policy",
            "evaluate_baselines", "summarise", "format_table", "write_csv", "append_csv",
            "by_bucket", "meta_arrays", "write_episode_csv"]

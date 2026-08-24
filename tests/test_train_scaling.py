@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,12 +17,14 @@ from rlplanner.sim.env import DisasterEnv
 from rlplanner.sim.vec_env import VecEnv
 from rlplanner.train.evaluate import EVAL_META, by_bucket
 from rlplanner.train.obs import ObsBatch
-from rlplanner.train.par_env import EnvGroup, RandomSampler, SerialVecEnv, TaskSampler
+from rlplanner.train.par_env import (EnvGroup, RandomSampler, SerialVecEnv, SubprocVecEnv,
+                                     TaskSampler)
 from rlplanner.train.policy import TokenPolicy
 from rlplanner.train.ppo import PPO, PPOConfig
 from rlplanner.train.rollout import Collector, gae
-from rlplanner.train.scenes import (AUTO, SceneBank, auto_robots, auto_t_max, parse_robots,
-                                    parse_scene_mix, parse_t_max, region_area_km2)
+from rlplanner.train.scenes import (AUTO, T_MAX_MAX_S, T_MAX_MIN_S, SceneBank, auto_robots,
+                                    auto_t_max, parse_robots, parse_scene_mix, parse_t_max,
+                                    region_area_km2)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -302,3 +306,151 @@ def test_eval_csv_has_area_columns(tmp_path, monkeypatch):
     assert len(rows) == 2
     assert {int(r["n_robots"]) for r in rows} == {3, 4}
     assert {round(float(r["t_max"])) for r in rows} == {600, 900}
+
+
+# ---- the t_max cap override and fixed teams -----------------------------------------------------
+def test_t_max_cap_raises_the_horizon_and_defaults_to_today():
+    big = region_area_km2((1500, 1500))
+    assert auto_t_max(big) == T_MAX_MAX_S == 1500.0          # default is unchanged
+    assert auto_t_max(big, 3000.0) == pytest.approx(2250.0)  # 600 * 3.75, now under the cap
+    assert auto_t_max(region_area_km2((4000, 4000)), 3000.0) == 3000.0
+    assert auto_t_max(region_area_km2((100, 100)), 3000.0) == 600.0      # floor is untouched
+    assert auto_t_max(big, 0.0) == T_MAX_MAX_S                # non-positive means "the default"
+
+
+def test_scene_bank_carries_the_cap(tmp_path):
+    scene_file(tmp_path, "a", (240, 240))
+    scene_file(tmp_path, "b", (1500, 1500))
+    spec = str(tmp_path / "*.json")
+    small, big = sorted(SceneBank(spec).keys, key=SceneBank(spec).area)
+    assert SceneBank(spec).env_params(big, AUTO, AUTO) == (8, 1500.0)
+    bank = SceneBank(spec, t_max_cap=3000.0)
+    assert bank.t_max_cap == 3000.0
+    assert bank.env_params(big, AUTO, AUTO)[1] == pytest.approx(2250.0)
+    assert bank.env_params(small, AUTO, AUTO) == (3, 600.0)
+    assert bank.env_params(big, AUTO, 900.0) == (8, 900.0)    # an explicit --t-max still wins
+    assert bank.t_max_bounds(AUTO)[1] == pytest.approx(2250.0)
+
+
+def test_t_max_cap_reaches_the_env_slots(tmp_path):
+    scene_file(tmp_path, "big", (1500, 1500))
+    with SerialVecEnv(str(tmp_path / "*.json"), tiny_cfg(2, 60.0), 1, robots=(2, 2), split="all",
+                      seed=0, n_workers=1, t_max=float(AUTO), send_bev=False,
+                      t_max_cap=3000.0) as vec:
+        vec.reset_all()
+        assert vec.groups[0].envs[0].cfg.t_max_s == pytest.approx(2250.0)
+
+
+@pytest.mark.parametrize("script", ["train", "imitate"])
+def test_the_parser_help_renders(script):
+    """argparse `%`-formats every help string it prints, so one literal `%` in a help line makes
+    `--help` raise (`scripts/imitate.py --help` did, on `96%`)."""
+    assert "--t-max-cap" in load_script(script).build_parser().format_help()
+
+
+@pytest.mark.parametrize("script", ["train", "imitate", "eval_policy"])
+def test_scripts_take_fixed_robots_and_a_t_max_cap(script):
+    mod = load_script(script)
+    ap = mod.build_parser() if hasattr(mod, "build_parser") else None
+    if ap is None:                                   # eval_policy builds its parser inside main()
+        assert "--t-max-cap" in Path(mod.__file__).read_text()
+        return
+    a = ap.parse_args(["--robots", "8", "--t-max", "auto", "--t-max-cap", "3000"])
+    assert parse_robots(a.robots) == (8, 8)
+    assert a.t_max_cap == 3000.0
+    assert ap.parse_args([]).t_max_cap == T_MAX_MAX_S          # default reproduces today
+
+
+def test_fixed_eight_robot_team_runs_end_to_end(tmp_path, monkeypatch):
+    scene_file(tmp_path, "a", (240, 240))
+    monkeypatch.chdir(tmp_path)
+    ev = load_script("eval_policy")
+    out = tmp_path / "e8.csv"
+    rc = ev.main(["--policy", "lawnmower", "--policy", "oracle_assign",
+                  "--scenes", str(tmp_path / "*.json"), "--split", "all", "--episodes", "2",
+                  "--robots", "8", "--t-max", "auto", "--t-max-cap", "3000",
+                  "--backend", "serial", "--device", "cpu", "--out", str(out)])
+    assert rc == 0
+    lines = (tmp_path / "e8.episodes.csv").read_text().strip().splitlines()
+    cols = lines[0].split(",")
+    rows = [dict(zip(cols, ln.split(","))) for ln in lines[1:]]
+    assert {r["policy"] for r in rows} == {"lawnmower", "oracle_assign"}
+    assert {int(r["n_robots"]) for r in rows} == {8}
+    assert {round(float(r["t_max"])) for r in rows} == {600}   # a 240 m scene sits on the floor
+
+
+def test_a_cap_the_rule_cannot_honour_is_stored_as_the_one_that_ran(tmp_path):
+    """`auto_t_max` clamps the cap to the 600 s floor and reads non-positive as 'the default', so
+    `SceneBank.t_max_cap` is the *effective* cap: what a run records is the horizon it ran."""
+    scene_file(tmp_path, "big", (1500, 1500))
+    spec = str(tmp_path / "*.json")
+    for raw, eff in ((3000.0, 3000.0), (900.0, 900.0), (100.0, T_MAX_MIN_S), (1.0, T_MAX_MIN_S),
+                     (0.0, T_MAX_MAX_S), (-5.0, T_MAX_MAX_S)):
+        bank = SceneBank(spec, t_max_cap=raw)
+        key = bank.keys[0]
+        assert bank.t_max_cap == eff, raw
+        assert bank.env_params(key, AUTO, AUTO)[1] == auto_t_max(bank.area(key), raw)
+        assert bank.env_params(key, AUTO, AUTO)[1] == auto_t_max(bank.area(key), bank.t_max_cap)
+
+
+def test_the_eval_csv_and_the_resolved_rule_report_the_effective_cap(tmp_path, monkeypatch):
+    scene_file(tmp_path, "a", (240, 240))
+    tr = load_script("train")
+    a = tr.build_parser().parse_args(["--t-max-cap", "0"])
+    bank = SceneBank(str(tmp_path / "*.json"), t_max_cap=a.t_max_cap)
+    res = tr._resolved(bank, a, 3, 3, 3, 3, 600.0, 600.0, None)
+    assert res["t_max_cap"] == T_MAX_MAX_S and f"600, {T_MAX_MAX_S:.0f})" in res["rule"]
+
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "cap.csv"
+    rc = load_script("eval_policy").main(
+        ["--policy", "random", "--scenes", str(tmp_path / "*.json"), "--split", "all",
+         "--episodes", "1", "--robots", "3", "--t-max", "auto", "--t-max-cap", "0",
+         "--backend", "serial", "--device", "cpu", "--out", str(out)])
+    assert rc == 0
+    lines = out.read_text().strip().splitlines()
+    row = dict(zip(lines[0].split(","), lines[1].split(",")))
+    assert float(row["t_max_cap"]) == T_MAX_MAX_S
+
+
+def test_t_max_cap_reaches_a_subprocess_worker(tmp_path):
+    """The workers rebuild the bank from the `ShardSpec`, so the cap has to travel in it."""
+    scene_file(tmp_path, "big", (1100, 1100))
+    spec = str(tmp_path / "*.json")
+    key = SceneBank(spec).split("all")[0]
+    with SubprocVecEnv(spec, tiny_cfg(2, 60.0), 1, robots=(2, 2), split="all", seed=0,
+                       n_workers=1, t_max=float(AUTO), send_bev=False, t_max_cap=3000.0) as vec:
+        assert vec.specs[0].t_max_cap == 3000.0
+        rows = vec.run_episodes("random", [(key, 0)], 2, max_decisions=1)
+    assert rows[0]["t_max"] == pytest.approx(auto_t_max(region_area_km2((1100, 1100)), 3000.0))
+    assert rows[0]["t_max"] > T_MAX_MAX_S          # and the default cap would have bitten
+
+
+# ---- warmstart.sh ------------------------------------------------------------------------------
+def _warmstart(tmp_path: Path, **env) -> list[str]:
+    """Run it with a stub `uv` on PATH: every stage's command line, none of them executed."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "uv").write_text('#!/bin/sh\necho "UV $*"\n')
+    (bin_dir / "uv").chmod(0o755)
+    e = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+         **{k: str(v) for k, v in env.items()}}
+    r = subprocess.run(["bash", str(ROOT / "scripts" / "warmstart.sh")], cwd=tmp_path, env=e,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    return [ln for ln in r.stdout.splitlines() if ln.startswith("UV ")]
+
+
+def test_warmstart_hands_the_horizon_and_the_team_to_every_stage(tmp_path):
+    lines = _warmstart(tmp_path, WS_TMAX="auto", WS_TMAX_CAP="3000", WS_ROBOTS="8")
+    assert len(lines) == 6                        # bc, ft, and the four eval rows
+    for ln in lines:
+        assert "--robots 8" in ln and "--t-max-cap 3000" in ln and "--t-max auto" in ln
+
+
+def test_warmstart_without_the_horizon_env_keeps_the_envconfig_clock(tmp_path):
+    """An unset `WS_TMAX` must not become an empty `--t-max`, and must not trip `set -e`."""
+    lines = _warmstart(tmp_path)
+    assert len(lines) == 6
+    for ln in lines:
+        assert "--t-max-cap 1500" in ln and " --t-max " not in ln and "--robots 3" in ln

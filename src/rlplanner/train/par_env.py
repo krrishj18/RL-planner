@@ -26,7 +26,7 @@ import numpy as np
 
 from ..sim.config import EnvConfig
 from ..sim.vec_env import VecObs
-from .scenes import AUTO, DEFAULT_REGION, SceneBank, SceneKey
+from .scenes import AUTO, DEFAULT_REGION, T_MAX_MAX_S, SceneBank, SceneKey
 
 STEP, RESET, CLOSE, SCENES, EPISODES, EVAL_START, EVAL_STEP, EVAL_END, DAGGER = range(9)
 _OBS_FIELDS = ("tokens", "token_mask", "token_xy", "token_type", "token_id", "robot_feat",
@@ -369,10 +369,11 @@ class ShardSpec:
     num_threads: int
     t_max: float | None = None
     scene_mix: dict[str, float] | None = None
+    t_max_cap: float = T_MAX_MAX_S
 
 
 def _build_group(spec: ShardSpec) -> tuple[SceneBank, EnvGroup]:
-    bank = SceneBank(spec.scenes, spec.region_m, spec.holdout_frac)
+    bank = SceneBank(spec.scenes, spec.region_m, spec.holdout_frac, spec.t_max_cap)
     keys = bank.split(spec.split)
     shard_keys = keys[spec.index::spec.n_shards] or keys
     w = bank.mix_weights(shard_keys, spec.scene_mix)
@@ -464,7 +465,7 @@ class _ShardedVecEnv:
                  split: str = "train", seed: int = 0, n_workers: int | None = None,
                  send_bev: bool = True, region_m: Sequence[float] = DEFAULT_REGION,
                  holdout_frac: float = 0.1, num_threads: int = 1, t_max: float | None = None,
-                 scene_mix: dict[str, float] | None = None):
+                 scene_mix: dict[str, float] | None = None, t_max_cap: float = T_MAX_MAX_S):
         if int(n_envs) < 1:
             raise ValueError(f"n_envs must be >= 1, got {n_envs}")
         self.n_envs = int(n_envs)
@@ -473,12 +474,14 @@ class _ShardedVecEnv:
         if self.robots[1] < self.robots[0]:
             raise ValueError(f"robots range {self.robots} is empty")
         self.t_max = None if t_max is None else float(t_max)
+        self.t_max_cap = float(t_max_cap)
         self.scene_mix = scene_mix
         self.n_workers = max(1, min(int(n_workers or default_workers(self.n_envs)), self.n_envs))
         # auto robot counts vary with the scene, so R is the bank-wide maximum (meta only: the
         # parent reads scene headers, never whole scenes)
         self.R = (self.robots[1] if self.robots[1] > 0 else
-                  SceneBank(str(scenes), region_m, holdout_frac).robot_bounds(self.robots)[1])
+                  SceneBank(str(scenes), region_m, holdout_frac,
+                            self.t_max_cap).robot_bounds(self.robots)[1])
         self.K = int(cfg.k_tokens)
         self.send_bev = bool(send_bev)
         self.closed = False
@@ -491,7 +494,8 @@ class _ShardedVecEnv:
                                 seed=int(seed), robots=self.robots, slots=tuple(int(x) for x in c),
                                 index=w, n_shards=self.n_workers, R=self.R, K=self.K,
                                 send_bev=self.send_bev, num_threads=int(num_threads),
-                                t_max=self.t_max, scene_mix=self.scene_mix)
+                                t_max=self.t_max, scene_mix=self.scene_mix,
+                                t_max_cap=self.t_max_cap)
                       for w, c in enumerate(chunks)]
 
     # -- transport (subclass) --------------------------------------------------------------

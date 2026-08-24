@@ -22,7 +22,8 @@ from rlplanner.sim.config import EnvConfig
 from rlplanner.viz import display
 from rlplanner.viz.recorder import EpisodeRecorder
 
-POLICIES = ("random", "nearest_frontier", "ray_follower", "segment_seeker", "oracle")
+POLICIES = ("random", "nearest_frontier", "lawnmower", "ray_follower", "segment_seeker",
+            "oracle", "oracle_assign")
 ALIASES = {"nearest": "nearest_frontier"}
 DEFAULT_OUT = "runs/ep.mp4"
 
@@ -106,8 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--scene", help="scene.json")
     src.add_argument("--synthetic", type=int, metavar="SEED")
     ap.add_argument("--policy", default="nearest_frontier",
-                    help="a sim.baselines name (random|nearest_frontier|ray_follower|"
-                         "voxel_seeker|oracle), or ckpt:<path.pt> / ckpt:latest with --run")
+                    help=f"a sim.baselines name ({'|'.join(policy_names())}), or "
+                         "ckpt:<path.pt> / ckpt:latest with --run")
     ap.add_argument("--run", default=None, help="run name under runs/ for --policy ckpt:latest")
     ap.add_argument("--device", default="auto", help="torch device for a ckpt: policy")
     ap.add_argument("--robots", type=int, default=3)

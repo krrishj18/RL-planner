@@ -25,7 +25,7 @@ import yaml
 
 from rlplanner.sim.config import EnvConfig
 from rlplanner.sim.tokens import BEV_CHANNELS
-from rlplanner.train.evaluate import (EVAL_COLS, HEURISTICS, TorchActor, append_csv,
+from rlplanner.train.evaluate import (EVAL_COLS, HEURISTICS, PRIVILEGED, TorchActor, append_csv,
                                       evaluate_baselines, evaluate_policy, format_table,
                                       summarise, write_csv)
 from rlplanner.train.imitation import (DaggerConfig, Imitator, LabelBuffer, agreement,
@@ -33,7 +33,7 @@ from rlplanner.train.imitation import (DaggerConfig, Imitator, LabelBuffer, agre
 from rlplanner.train.par_env import make_vec_env
 from rlplanner.train.policy import TokenPolicy
 from rlplanner.train.rollout import EpisodeStats
-from rlplanner.train.scenes import AUTO, SceneBank, parse_robots, parse_t_max
+from rlplanner.train.scenes import AUTO, T_MAX_MAX_S, SceneBank, parse_robots, parse_t_max
 from rlplanner.train.teachers import TEACHER_RADIUS_M, TEACHERS
 
 REPORT = ("frac_found", "finds_auc", "time_to_first", "redundancy_frac", "intentional_revisits")
@@ -54,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--scenes", default="synthetic:0-200", nargs="+")
     ap.add_argument("--robots", default="3")
     ap.add_argument("--t-max", default=None)
+    ap.add_argument("--t-max-cap", type=float, default=T_MAX_MAX_S,
+                    help=f"upper clip of the area-scaled t_max in seconds (default "
+                         f"{T_MAX_MAX_S:.0f}); only bites with --t-max auto")
     ap.add_argument("--teacher", default="oracle_sweep", choices=sorted(TEACHERS))
     ap.add_argument("--teacher-radius", type=float, default=TEACHER_RADIUS_M,
                     help="oracle_sweep sweeps when no token is this close to an unfound casualty")
@@ -71,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--balance", action=argparse.BooleanOptionalAction, default=False,
                     help="inverse-frequency weighting over the label's token type. Off by "
                          "default: it multiplies the rare `hold` label by ~4 and an under-trained "
-                         "student then holds position in 96% of its greedy decisions")
+                         "student then holds position in 96%% of its greedy decisions")
     ap.add_argument("--max-samples", type=int, default=2_000_000, help="robot-decisions held")
     ap.add_argument("--max-gb", type=float, default=8.0, help="RAM cap of the label buffer")
     ap.add_argument("--eval-episodes", type=int, default=16)
@@ -137,7 +140,7 @@ def main(argv=None) -> int:
     cfg.tokens.robot_bev_size = int(a.robot_bev_size) if a.use_robot_bev else 0
     lo, hi = parse_robots(a.robots)
     t_spec = parse_t_max(a.t_max)
-    bank = SceneBank(a.scenes)
+    bank = SceneBank(a.scenes, t_max_cap=a.t_max_cap)
     cfg.robot.n_robots = bank.robot_bounds((lo, hi))[0]
     if t_spec > 0:
         cfg.t_max_s = float(t_spec)
@@ -156,14 +159,16 @@ def main(argv=None) -> int:
     base: dict = {}
     if not a.no_baselines:
         t0 = time.perf_counter()
-        names = list(HEURISTICS) + ["oracle"] + ([a.teacher] if a.teacher != "oracle" else [])
+        names = list(HEURISTICS) + list(PRIVILEGED) + \
+            ([a.teacher] if a.teacher not in PRIVILEGED else [])
         base = evaluate_baselines(names, bank, _thin(cfg), a.eval_episodes, lo, seed=10_000,
                                   workers=a.workers, t_max=vec_t_max)
         write_csv(run / "baselines.csv", base, EVAL_COLS)
         print(f"[imitate] reference policies, {a.eval_episodes} held-out episodes "
               f"({time.perf_counter() - t0:.1f}s)\n" + format_table(base, REPORT))
 
-    mk = dict(cfg=cfg, robots=(lo, hi), seed=a.seed, send_bev=False, t_max=vec_t_max)
+    mk = dict(cfg=cfg, robots=(lo, hi), seed=a.seed, send_bev=False, t_max=vec_t_max,
+              t_max_cap=a.t_max_cap)
     hold = make_vec_env(a.env_backend, a.scenes, n_envs=a.workers, split="heldout",
                         n_workers=a.workers, **mk)
     vec = make_vec_env(a.env_backend, a.scenes, n_envs=a.envs, split="train",

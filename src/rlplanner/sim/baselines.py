@@ -14,11 +14,13 @@ import numpy as np
 
 from ..scene import schema
 from .config import DEFAULT_QUERIES
+from .embeddings import get_embedding_table
 from .sensor import human_visibility
-from .state import (F_DIST, F_FEAT0, TOKEN_FRONTIER, TOKEN_HOLD, TOKEN_RAY, TOKEN_SEGMENT,
-                    EnvState, TeamObs)
+from .state import (F_DIST, F_FEAT0, F_XABS, F_YABS, TOKEN_FRONTIER, TOKEN_HOLD, TOKEN_RAY,
+                    TOKEN_SEGMENT, EnvState, TeamObs)
 
 CLAIM_M = 15.0     # two robots flying to points this close are going to the same place
+HUMAN_CLASSES = (schema.CLASS_ID["human_standing"], schema.CLASS_ID["human_prone"])
 
 
 class _Claims:
@@ -218,6 +220,154 @@ class SegmentSeekerPolicy(Policy):
         return out
 
 
+class LawnmowerPolicy(Policy):
+    """Boustrophedon coverage that breaks off to investigate a human it actually sees.
+
+    **Sweep.** The region is cut into `n_robots` contiguous horizontal bands, robot `r` owning band
+    `r` (bands are disjoint, so the team de-conflicts by construction and the position claims only
+    bite on the out-of-band fallback). Inside its band the robot follows a fixed serpentine order:
+    lanes one sensor swath tall, +x along an even lane and -x along an odd one. The action is a
+    token, so "go to the next sweep waypoint" is *the in-band frontier with the smallest sweep key*
+    — frontiers vanish as the ground behind them is mapped, so the smallest remaining key is always
+    the next unswept point of the band and an interrupted sweep resumes where it stopped instead of
+    restarting. A frontier the robot has effectively already reached sorts last (the `min_travel`
+    guard of CONTRACTS.md 12, folded into the key rather than filtering); an empty band falls back
+    to the nearest frontier anywhere, and only a robot with no frontier at all holds.
+
+    **Investigate.** A sweep that ignores what it sees is not a search baseline, so a live ray whose
+    feature *is* a person diverts the robot. The classification is threshold-free: argmax cosine of
+    the ray token's own `feat` over the **whole class-embedding set**, a human ray iff the argmax
+    lands on `human_standing`/`human_prone`. No score is compared against a cutoff and no mission
+    query is read — the queries would make the divert a function of the word list. The nearest such
+    ray wins, and the robot stays on it until the ray resolves (it leaves the token set) or it has
+    arrived (the target falls inside the `min_travel` guard), then the sweep resumes at its next
+    waypoint. This runs on the robot's own view, so it works unchanged under range comms; a ray a
+    peer gossiped is investigated like the robot's own.
+
+    Only rays trigger a divert. Only an `open`-visibility human raises a far-field human ray at all
+    (CONTRACTS.md 4): a casualty in a car, a building or under rubble is a `vehicle_toppled` /
+    `building_damaged` / `debris` ray and this baseline sweeps past it, which is exactly the gap a
+    learned policy has to close. Segments are not diverted to either — at `segment_scale = 40` a
+    body is absorbed by its neighbours, so a human-classified segment would be a persistent region
+    with no resolution rule and a threshold-free argmax over it livelocks (CONTRACTS.md 12);
+    close-range human voxels accrue their find hits from the sweep's own footprint anyway.
+    """
+    name = "lawnmower"
+
+    def __init__(self, queries=DEFAULT_QUERIES, seed: int = 0, min_travel_m: float | None = None):
+        super().__init__(queries, seed)
+        self.min_travel_m = min_travel_m
+        self._chasing: dict[int, int] = {}      # robot -> ray token id it is investigating
+        self._class_emb: dict[int, np.ndarray] = {}
+
+    def reset(self, seed: int | None = None) -> None:
+        super().reset(seed)
+        self._chasing.clear()
+
+    def act(self, obs, state=None):
+        n = obs.n_robots
+        out = np.zeros(n, np.int64)
+        taken = _Claims()
+        lo = self._min_travel(state)
+        lane_h = self._lane_height(state)
+        cls = self._classes(obs, state)
+        for r in range(n):
+            pick = self._investigate(obs, state, r, taken, lo, cls)
+            out[r] = self._sweep(obs, state, r, n, taken, lo, lane_h) if pick < 0 else pick
+        return out
+
+    # -- investigate -----------------------------------------------------------------------
+    def _classes(self, obs, state) -> np.ndarray:
+        """[N_CLASSES, D] class embeddings — the robot's own text tower, not a belief the sim keeps.
+
+        The env's table when there is one (so a custom similarity table or embedding cache is
+        honoured), else the default table at the width of the token feature tail — which is the
+        only D the argmax can use, and is not always the query block's (a hand-built observation,
+        or a query set the env did not embed).
+        """
+        emb = getattr(state, "emb", None) if state is not None else None
+        if emb is not None:
+            return np.asarray(emb.class_emb, np.float32)
+        d = int(obs.tokens.shape[2]) - F_FEAT0
+        hit = self._class_emb.get(d)
+        if hit is None:
+            hit = np.asarray(get_embedding_table(self.queries, dim=d).class_emb, np.float32)
+            self._class_emb[d] = hit
+        return hit
+
+    def _human_rays(self, obs, r: int, cls: np.ndarray) -> np.ndarray:
+        """[K] True on the selectable ray tokens whose feature classifies as a person."""
+        f = obs.tokens[r, :, F_FEAT0:]
+        n = np.linalg.norm(f, axis=1, keepdims=True)
+        with np.errstate(invalid="ignore"):     # a non-finite feature divides to nan, not a warning
+            arg = ((f / np.maximum(n, 1e-12)) @ cls.T).argmax(axis=1)
+        hit = np.isin(arg, HUMAN_CLASSES) & obs.token_mask[r] & (obs.token_type[r] == TOKEN_RAY)
+        return hit & (n[:, 0] > 0)             # zero or non-finite: no argmax to trust
+
+    def _investigate(self, obs, state, r: int, taken: "_Claims", lo: float,
+                     cls: np.ndarray) -> int:
+        """The ray token to fly at, or -1 to sweep. Sticky: the current one until it goes away."""
+        hit = self._human_rays(obs, r, cls)
+        live = {int(obs.token_id[r, k]): int(k) for k in np.flatnonzero(hit)
+                if self._dist(state, r, int(k), obs) >= lo}
+        held = self._chasing.get(r)
+        if held is not None and held in live \
+                and not taken.has((TOKEN_RAY, held), obs.token_xy[r, live[held]]):
+            taken.add((TOKEN_RAY, held), obs.token_xy[r, live[held]])
+            return live[held]
+        # resolved, arrived, or a lower-index robot got there first: back to the sweep
+        self._chasing.pop(r, None)
+        best, best_d = -1, np.inf
+        for rid, k in live.items():
+            if taken.has((TOKEN_RAY, rid), obs.token_xy[r, k]):
+                continue
+            d = self._dist(state, r, k, obs)
+            if d < best_d:
+                best, best_d = k, d
+        if best < 0:
+            return -1
+        self._chasing[r] = int(obs.token_id[r, best])
+        taken.add((TOKEN_RAY, self._chasing[r]), obs.token_xy[r, best])
+        return best
+
+    # -- sweep -----------------------------------------------------------------------------
+    @staticmethod
+    def _lane_height(state) -> float:
+        """One sensor swath, in the [-1, 1] region coordinates the tokens carry."""
+        if state is None:
+            return 2.0                          # no region to scale by: one lane per band
+        c = state.cfg
+        swath = 2.0 * float(np.sqrt(max(c.sensor.depth_limit_m ** 2
+                                        - c.robot.flight_alt_m ** 2, 1.0)))
+        y0, y1 = state.raster.region[1], state.raster.region[3]
+        return float(max(2.0 * swath / max(y1 - y0, 1e-9), 1e-6))
+
+    def _sweep(self, obs, state, r: int, n_robots: int, taken: "_Claims", lo: float,
+               lane_h: float) -> int:
+        band = 2.0 / max(int(n_robots), 1)
+        y_lo = -1.0 + band * int(r)
+        y_hi = 1.0 + 1e-6 if r == n_robots - 1 else y_lo + band
+        best, best_key = -1, None
+        for k in self._valid(obs, r):
+            k = int(k)
+            if int(obs.token_type[r, k]) != TOKEN_FRONTIER:
+                continue
+            yn = float(obs.tokens[r, k, F_YABS])
+            if not (y_lo <= yn < y_hi):
+                continue
+            if taken.has((TOKEN_FRONTIER, int(obs.token_id[r, k])), obs.token_xy[r, k]):
+                continue
+            xn = float(obs.tokens[r, k, F_XABS])
+            lane = int((yn - y_lo) / lane_h)
+            key = (self._dist(state, r, k, obs) < lo, lane, xn if lane % 2 == 0 else -xn)
+            if best_key is None or key < best_key:
+                best, best_key = k, key
+        if best >= 0:
+            taken.add((TOKEN_FRONTIER, int(obs.token_id[r, best])), obs.token_xy[r, best])
+            return best
+        return self._nearest_frontier(obs, state, r, taken, lo)
+
+
 class OraclePolicy(Policy):
     """Privileged: hold while a casualty is inside the mapping footprint (finding is by hit count,
     so dwelling is the productive action), otherwise the token closest to the nearest unfound one."""
@@ -254,16 +404,7 @@ class OraclePolicy(Policy):
             if (iv & (rr <= cf.sensor.depth_limit_m)).any():
                 out[r] = 0                # one is in the camera already: dwell until the hits land
                 continue
-            d = np.hypot(tx - rb.pos[0], ty - rb.pos[1])
-            order = np.argsort(d, kind="stable")
-            goal = None
-            for c in order:
-                if int(c) not in taken:
-                    goal = int(c)
-                    break
-            if goal is None:
-                goal = int(order[0])
-            taken.add(goal)
+            goal = self._goal(state, r, tx, ty, taken)
             gx, gy = tx[goal], ty[goal]
             xy = obs.token_xy[r][v]
             dd = np.hypot(xy[:, 0] - gx, xy[:, 1] - gy)
@@ -276,9 +417,67 @@ class OraclePolicy(Policy):
             out[r] = int(v[int(np.argmin(dd))]) if np.isfinite(dd).any() else int(v[0])
         return out
 
+    def _goal(self, state, r: int, tx: np.ndarray, ty: np.ndarray, taken: set[int]) -> int:
+        """Greedy claim: the nearest unfound casualty no lower-index robot took, else the nearest."""
+        d = np.hypot(tx - state.robots[r].pos[0], ty - state.robots[r].pos[1])
+        order = np.argsort(d, kind="stable")
+        goal = next((int(c) for c in order if int(c) not in taken), int(order[0]))
+        taken.add(goal)
+        return goal
 
-POLICIES = {p.name: p for p in (RandomPolicy, NearestFrontierPolicy, RayFollowerPolicy,
-                                SegmentSeekerPolicy, OraclePolicy)}
+
+class OracleAssignPolicy(OraclePolicy):
+    """Privileged: the optimal robot -> unfound-casualty matching instead of the oracle's greedy
+    claims, re-solved from scratch every decision as casualties are found.
+
+    Everything else is `OraclePolicy` — the same dwell rule and the same mechanical channel to a
+    casualty (the token nearest to it, hold excluded, tokens the robot has effectively reached
+    excluded) — so a row against `oracle` isolates the assignment and nothing else. The cost is the
+    straight-line robot/casualty distance, matched by `scipy.optimize.linear_sum_assignment`.
+    With more robots than casualties the matching leaves robots over; each of those takes the
+    oracle's own no-claim line, its nearest unfound casualty.
+    """
+    name = "oracle_assign"
+    privileged = True
+
+    def __init__(self, queries=DEFAULT_QUERIES, seed: int = 0, min_travel_m: float = 6.0):
+        super().__init__(queries, seed, min_travel_m)
+        self._plan: np.ndarray | None = None
+
+    def act(self, obs, state=None):
+        self._plan = None                         # re-solve every decision
+        return super().act(obs, state)
+
+    def _goal(self, state, r: int, tx: np.ndarray, ty: np.ndarray, taken: set[int]) -> int:
+        if self._plan is None:
+            pos = np.array([rb.pos[:2] for rb in state.robots], np.float64)
+            self._plan = assign_casualties(pos, tx, ty)
+        g = int(self._plan[r]) if r < self._plan.size else -1
+        if g < 0:
+            return super()._goal(state, r, tx, ty, taken)
+        taken.add(g)
+        return g
+
+
+def assign_casualties(pos: np.ndarray, tx: np.ndarray, ty: np.ndarray) -> np.ndarray:
+    """Min-cost robot -> casualty matching over the straight-line distance matrix.
+
+    -> int64 [n_robots], the casualty index per robot, -1 where the matching left the robot over
+    (more robots than casualties). Deterministic: `linear_sum_assignment` is.
+    """
+    from scipy.optimize import linear_sum_assignment
+    out = np.full(pos.shape[0], -1, np.int64)
+    if pos.size == 0 or tx.size == 0:
+        return out
+    cost = np.hypot(pos[:, 0][:, None] - tx[None, :], pos[:, 1][:, None] - ty[None, :])
+    rows, cols = linear_sum_assignment(cost)
+    out[rows] = cols
+    return out
+
+
+POLICIES = {p.name: p for p in (RandomPolicy, NearestFrontierPolicy, LawnmowerPolicy,
+                                RayFollowerPolicy, SegmentSeekerPolicy, OraclePolicy,
+                                OracleAssignPolicy)}
 
 
 def make_policy(name: str, queries=DEFAULT_QUERIES, seed: int = 0) -> Policy:
@@ -287,5 +486,6 @@ def make_policy(name: str, queries=DEFAULT_QUERIES, seed: int = 0) -> Policy:
     return POLICIES[name](queries=queries, seed=seed)
 
 
-__all__ = ["Policy", "RandomPolicy", "NearestFrontierPolicy", "RayFollowerPolicy",
-           "SegmentSeekerPolicy", "OraclePolicy", "POLICIES", "make_policy"]
+__all__ = ["Policy", "RandomPolicy", "NearestFrontierPolicy", "LawnmowerPolicy",
+           "RayFollowerPolicy", "SegmentSeekerPolicy", "OraclePolicy", "OracleAssignPolicy",
+           "assign_casualties", "POLICIES", "make_policy", "HUMAN_CLASSES"]

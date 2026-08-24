@@ -84,6 +84,29 @@ open · vehicle · building · rubble, of 2.9 · 1.75 · 2.95 · 4.4 present):
 map with no revisit suppression, so a threshold-free greedy pick keeps returning to the same neighbourhood and coverage
 stops at 0.09 against 0.98 for a plain sweep. Reported, not tuned away — moving on is what a learned policy is for.
 
+Two later baselines, measured on the same configuration but over **10** episodes (so not directly comparable with the
+20-episode table above; `random` 0.41 / 0.23, `nearest_frontier` 0.42 / 0.28, `ray_follower` 0.52 / 0.33 on the same
+10):
+
+| policy | fraction found | finds-AUC | time to half (s) | redundancy fraction | finds by container |
+|---|---|---|---|---|---|
+| lawnmower | 0.34 ± 0.14 | 0.22 | 569 | **0.39** | 2.00 · 0.70 · 0.70 · 0.70 |
+| oracle_assign (knows casualties) | 0.93 ± 0.10 | 0.77 | **98** | 0.50 | 2.40 · 1.90 · 2.30 · 4.50 |
+
+`lawnmower` is the coverage baseline: disjoint horizontal bands, a serpentine sweep inside each, and a divert onto any
+live ray whose feature argmaxes to `human_standing`/`human_prone` (9% of its robot-decisions on synthetic seeds 0-5).
+It re-covers the least ground of any baseline (redundancy fraction 0.39 against `nearest_frontier` 0.46 and
+`ray_follower` 0.72) and it finds **every** open casualty, but finding needs `found_hits` looks at one cell, so a
+steady sweep dwells less than a policy that ping-pongs and it trails on the container casualties. Only an
+`open`-visibility human raises a far-field human ray at all, so a casualty in a car, a building or under rubble is a
+container ray it sweeps past — the gap a learned policy has to close.
+
+`oracle_assign` is `oracle` with the greedy nearest-casualty claim replaced by the optimal matching
+(`scipy.optimize.linear_sum_assignment`, re-solved every decision). It reaches half the casualties in 98 s against the
+greedy oracle's 139 s on the same 10 episodes, and finds slightly more of them (0.93 / 0.77 against 0.91 / 0.75) — but
+it pays 5.5 intentional revisits per episode against the greedy oracle's 0, because concentrating the team on the
+casualties that are left *is* revisiting (DESIGN_VARIANTS.md H), so its raw reward is lower.
+
 No policy has been trained on this simulator yet. The earlier result (`runs/syn_fixed/`, trained policy 0.80 found /
 0.61 AUC vs BT 0.67 / 0.55) was obtained on the previous simulator design and is kept only as evidence that the training
 pipeline learns.

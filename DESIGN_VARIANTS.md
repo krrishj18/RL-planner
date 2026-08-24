@@ -198,3 +198,23 @@ only ~-0.05; (3) rays are the payload that matters (share_rays ≈ share_all > p
 a few points (tokens_only lowest of the share-all family); (5) noreward PPO-from-scratch (0.67) ≈ warm-start
 (0.68) on synthetic — the earlier from-scratch plateau was partly the penalty terms.
 Full tables with CI/AUC: /volume4/dsta/rl-planner/sweep_v2/runs/**/summary.md.
+
+## H3 — v2 city-scale warm-start (`ws_v2_central`)
+
+Warm-start on the v2 downtown distribution itself (DAgger 345k labels from `oracle_sweep`, BC 0.12–0.13
+found, then PPO 200 updates). Held-out v2 eval, 12 episodes, identical protocol for all rows:
+
+| policy | found | finds-AUC | t_first | reward |
+|---|---|---|---|---|
+| random | 0.02 | 0.02 | 584 s | −33 |
+| segment_seeker | 0.01 | 0.01 | — | −29 |
+| ray_follower | 0.11 ± 0.02 | 0.06 | 130 s | −5.7 |
+| oracle (greedy, privileged) | 0.14 ± 0.05 | 0.12 | 40 s | −256 |
+| nearest_frontier | 0.15 ± 0.03 | 0.08 | 106 s | +3.8 |
+| **ft (DAgger→PPO)** | **0.19 ± 0.03** | **0.11 ± 0.02** | **68 s** | **+7.8** |
+
+Reading: at city scale (0.3–2 km², coverage impossible in budget) the learned policy is the best method —
+it clears nearest-frontier on found and AUC and beats the greedy privileged oracle, whose beeline behaviour
+collapses (coverage 0.10, reward −256). Combined with H2's zero-shot collapse (0.06), the conclusion is that
+the architecture transfers but the policy must be trained on the target scene distribution.
+Artifacts: `/volume4/dsta/rl-planner/ws_v2_central/runs/ws_central_full/{bc,ft}/`.

@@ -92,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--comms-range", default=None,
                     help="fixed link range in metres ('inf' allowed); disables the per-episode "
                          "randomisation over comms.range_choices")
+    ap.add_argument("--dynamic-queries", action="store_true",
+                    help="sample and edit the mission queries per episode (EnvConfig.queries_dynamic)")
+    ap.add_argument("--dq-every", type=int, default=10, help="decisions between query edit draws")
+    ap.add_argument("--dq-noise", type=float, default=0.0,
+                    help="per-dim noise on a drawn query embedding")
     ap.add_argument("--variant", default=None,
                     help="configs/variants/<name>.yaml (EnvConfig + a train: block of flags, "
                          "including policy.sequential_decode)")
@@ -255,6 +260,10 @@ def main(argv=None) -> int:
     if a.comms_range is not None:
         cfg.comms.range_m = float(a.comms_range)
         cfg.comms.randomize_range = False
+    if a.dynamic_queries:
+        cfg.queries_dynamic.enabled = True
+        cfg.queries_dynamic.every = int(a.dq_every)
+        cfg.queries_dynamic.noise_std = float(a.dq_noise)
     lo, hi = parse_robots(a.robots)
     t_spec = parse_t_max(a.t_max)
     mix = parse_scene_mix(a.scene_mix)
@@ -291,6 +300,7 @@ def _resolved(bank: SceneBank, a, lo: int, hi: int, rlo: int, rhi: int, tlo: flo
         "rule": "n_robots = clip(round(3*sqrt(area_km2/0.16)), 3, 8); "
                 f"t_max_s = clip(600*sqrt(area_km2/0.16), 600, {bank.t_max_cap:.0f})",
         "t_max_cap": float(bank.t_max_cap),      # the effective cap, not the raw flag
+        "dynamic_queries": bool(a.dynamic_queries),
         "robots": "auto" if lo <= 0 else [lo, hi], "robots_range": [rlo, rhi],
         "t_max": "auto" if a.t_max and str(a.t_max).lower() == "auto" else a.t_max,
         "t_max_range": [round(tlo, 1), round(thi, 1)],

@@ -9,14 +9,16 @@ W="${RLP_WORKERS_RESOLVED:-10}"; SCENES="${WS_SCENES:-synthetic:0-200}"; ROBOTS=
 # WS_TMAX_CAP: upper clip of the area-scaled horizon; only bites with WS_TMAX=auto.
 TMAX="${WS_TMAX:-}"; TMAX_CAP="${WS_TMAX_CAP:-1500}"
 HZ=(--t-max-cap "$TMAX_CAP"); [ -n "$TMAX" ] && HZ+=(--t-max "$TMAX")
+# WS_DYNQ=1: train and imitate with per-episode query edits (EnvConfig.queries_dynamic)
+DQ=(); if [ "${WS_DYNQ:-0}" = "1" ]; then DQ+=(--dynamic-queries); fi
 OUT="runs/ws_${VARIANT}"; mkdir -p "$OUT"
-echo "[warmstart] variant=$VARIANT teacher=$TEACHER iters=$ITERS steps=$STEPS ft=$FT workers=$W robots=$ROBOTS t_max=${TMAX:-cfg} cap=$TMAX_CAP"
+echo "[warmstart] variant=$VARIANT teacher=$TEACHER iters=$ITERS steps=$STEPS ft=$FT workers=$W robots=$ROBOTS t_max=${TMAX:-cfg} cap=$TMAX_CAP dynq=${WS_DYNQ:-0}"
 uv run python -u scripts/imitate.py --name "ws_${VARIANT}/bc" --variant "$VARIANT" --teacher "$TEACHER" \
   --scenes $SCENES --robots "$ROBOTS" --iters "$ITERS" --steps "$STEPS" --envs 32 --workers "$W" \
-  --epochs 3 --batch 64 --lr 5e-4 --max-gb 24 --eval-episodes "$EP" --eval-every 1 --device cuda --seed 0 "${HZ[@]}"
+  --epochs 3 --batch 64 --lr 5e-4 --max-gb 24 --eval-episodes "$EP" --eval-every 1 --device cuda --seed 0 "${HZ[@]}" "${DQ[@]}"
 uv run python -u scripts/train.py --name "ws_${VARIANT}/ft" --init-from "runs/ws_${VARIANT}/bc/bc.pt" \
   --scenes $SCENES --robots "$ROBOTS" --envs 32 --workers "$W" --rollout 64 --updates "$FT" \
-  --lr 1e-4 --critic-warmup 10 --actor-warmup 20 --bc-kl 0.05 --eval-every 25 --eval-episodes "$EP" --device cuda --seed 0 "${HZ[@]}"
+  --lr 1e-4 --critic-warmup 10 --actor-warmup 20 --bc-kl 0.05 --eval-every 25 --eval-episodes "$EP" --device cuda --seed 0 "${HZ[@]}" "${DQ[@]}"
 for mode in "" "--stochastic"; do
   for ck in "runs/ws_${VARIANT}/bc/bc.pt" "runs/ws_${VARIANT}/ft/latest.pt"; do
     uv run python scripts/eval_policy.py --policy "$ck" $mode --variant "$VARIANT" --scenes $SCENES --split heldout \

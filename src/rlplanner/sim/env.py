@@ -44,6 +44,8 @@ class DisasterEnv:
         self.prof: dict[str, float] | None = None
         self.comms: CommsSim | None = None
         self.visits: list[VisitRecord] = []
+        self._qsched = None
+        self._q_rng: np.random.Generator | None = None
         self.reset(seed)
 
     # ---- reset --------------------------------------------------------------------------------
@@ -90,9 +92,22 @@ class DisasterEnv:
         rf.end_of_decision(0.0, robots)
         rf.commit_decision()
         self._sync()
+        self._init_query_schedule()
         obs = self.builder.build(rf, robots, 0.0, self.planner, views=self._views(0.0))
         self.state.last_obs = obs
         return obs
+
+    def _init_query_schedule(self) -> None:
+        """Build the per-episode query sampler and draw the initial subset (off by default)."""
+        self._qsched = None
+        self._q_rng = None
+        qd = self.cfg.queries_dynamic
+        if not qd.enabled:
+            return
+        from ..llm.schedule import QueryScheduleSampler       # numpy-only; imported on demand
+        self._qsched = QueryScheduleSampler.from_config(qd, self.rf.emb, self.cfg)
+        self._q_rng = np.random.default_rng([self.seed, 0x51EED])
+        self._schedule_queries(initial=True)
 
     # ---- comms --------------------------------------------------------------------------------
     def _views(self, t: float):
@@ -195,6 +210,16 @@ class DisasterEnv:
         in the observation depends on the query list and a trained network keeps working.
         Returns the refreshed observation.
         """
+        self._set_queries(names, weights)
+        st = self.state
+        # the views of the decision that just ended, not a fresh extraction: nothing but the
+        # query block may move (CONTRACTS.md 5)
+        obs = self.builder.build(self.rf, st.robots, st.t, self.planner, views=self._last_views)
+        st.last_obs = obs
+        return obs
+
+    def _set_queries(self, names, weights=None) -> None:
+        """Swap the mission list without rebuilding the observation (the callers do that once)."""
         names = tuple(names)
         if len(names) > self.cfg.tokens.max_queries:
             raise ValueError(f"set_queries: {len(names)} queries exceed tokens.max_queries="
@@ -202,12 +227,17 @@ class DisasterEnv:
         self.rf.set_queries(names, weights)
         self.cfg.rayfronts.queries = names
         self._sync()
-        st = self.state
-        # the views of the decision that just ended, not a fresh extraction: nothing but the
-        # query block may move (CONTRACTS.md 5)
-        obs = self.builder.build(self.rf, st.robots, st.t, self.planner, views=self._last_views)
-        st.last_obs = obs
-        return obs
+
+    def _schedule_queries(self, initial: bool) -> None:
+        """Training-side query churn (`cfg.queries_dynamic`); a no-op while it is disabled."""
+        if self._qsched is None:
+            return
+        idx = int(self.state.decision_idx)
+        names, w = (self._qsched.initial(self._q_rng) if initial
+                    else self._qsched.edit(self.state.query_names(), self.rf.query_w, idx,
+                                           self._q_rng))
+        if names is not None:
+            self._set_queries(names, w)
 
     # ---- step ---------------------------------------------------------------------------------
     def step(self, actions):
@@ -313,6 +343,7 @@ class DisasterEnv:
         st.metrics = self.metrics.to_dict()
         if self.cfg.record_events:
             st.events += ev
+        self._schedule_queries(initial=False)     # cfg.queries_dynamic; disabled by default
         t0 = perf_counter() if self.prof is not None else 0.0
         obs = self.builder.build(self.rf, robots, st.t, self.planner, views=views)
         self._tick("tokens", t0)

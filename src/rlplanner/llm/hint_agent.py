@@ -392,7 +392,7 @@ class HintAgent:
             n = self._accept(t)
             if n is not None and n not in seen:
                 seen.add(n)
-                out.append((n, float(w)))
+                out.append((n, _w(w)))
         return out
 
     def update(self, digest: str) -> QueryEdits:
@@ -413,9 +413,14 @@ class HintAgent:
             n = self._accept(t)
             if n is None or n in active or n in [x for x, _ in add]:
                 continue
-            add.append((n, float(w)))
+            add.append((n, _w(w)))
         remove = [t for t in dict.fromkeys(e.remove) if t in active]
-        reweight = {t: float(w) for t, w in e.reweight.items() if t in active and t not in remove}
+        # the mission list may never go empty: the sim rejects one, and an empty active list would
+        # leave the agent describing a list the env does not have
+        if remove and not add and len(remove) >= len(active):
+            self._warn(f"kept {remove[-1]!r}: removing it would empty the query list")
+            remove.pop()
+        reweight = {t: _w(w) for t, w in e.reweight.items() if t in active and t not in remove}
         return QueryEdits(add=add, remove=remove, reweight=reweight, note=e.note)
 
     # -- list arithmetic --------------------------------------------------------------------------
@@ -479,6 +484,9 @@ class HintController:
         self.n_since = 0
 
     def start(self, env, context: str | None = None):
+        # the cap is the env's query-token capacity, not whatever the agent was built with, or a
+        # list the agent thinks is legal raises out of set_queries and into the episode
+        self.agent.max_queries = min(self.agent.max_queries, int(env.cfg.tokens.max_queries))
         ctx = context if context is not None else self.digest.context(env)
         pairs = self.agent.initial_queries(ctx)
         obs = self._push(env, pairs)

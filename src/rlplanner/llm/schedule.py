@@ -53,6 +53,12 @@ class QueryScheduleSampler:
         if not (1 <= lo <= hi):
             raise ValueError(f"QueryScheduleSampler: n_init must satisfy 1 <= lo <= hi, got {(lo, hi)}")
         self.n_init = (lo, min(hi, self.max_queries, len(self.pool)))
+        # a hand-written pool is the one place a name the table cannot embed gets in; say so here
+        # rather than deep inside the first reset's set_queries
+        unknown = [q for q in self.pool if q not in self.emb.bank]
+        if unknown and not self.emb.meta.get("pca"):
+            raise ValueError(f"QueryScheduleSampler: {self.emb.source} cannot embed {unknown!r}; "
+                             f"it knows {sorted(self.emb.bank)!r}")
         self._noised = 0
 
     # ---- construction -------------------------------------------------------------------------

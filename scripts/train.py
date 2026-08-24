@@ -94,9 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "randomisation over comms.range_choices")
     ap.add_argument("--dynamic-queries", action="store_true",
                     help="sample and edit the mission queries per episode (EnvConfig.queries_dynamic)")
-    ap.add_argument("--dq-every", type=int, default=10, help="decisions between query edit draws")
-    ap.add_argument("--dq-noise", type=float, default=0.0,
-                    help="per-dim noise on a drawn query embedding")
+    ap.add_argument("--dq-every", type=int, default=None,
+                    help="decisions between query edit draws (default: whatever the config says)")
+    ap.add_argument("--dq-noise", type=float, default=None,
+                    help="per-dim noise on a drawn query embedding (default: the config's)")
     ap.add_argument("--variant", default=None,
                     help="configs/variants/<name>.yaml (EnvConfig + a train: block of flags, "
                          "including policy.sequential_decode)")
@@ -260,10 +261,12 @@ def main(argv=None) -> int:
     if a.comms_range is not None:
         cfg.comms.range_m = float(a.comms_range)
         cfg.comms.randomize_range = False
-    if a.dynamic_queries:
+    if a.dynamic_queries:                        # the flag switches it on; the yaml keeps the rest
         cfg.queries_dynamic.enabled = True
-        cfg.queries_dynamic.every = int(a.dq_every)
-        cfg.queries_dynamic.noise_std = float(a.dq_noise)
+        if a.dq_every is not None:
+            cfg.queries_dynamic.every = int(a.dq_every)
+        if a.dq_noise is not None:
+            cfg.queries_dynamic.noise_std = float(a.dq_noise)
     lo, hi = parse_robots(a.robots)
     t_spec = parse_t_max(a.t_max)
     mix = parse_scene_mix(a.scene_mix)

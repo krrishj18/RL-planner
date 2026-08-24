@@ -41,7 +41,9 @@ def _unit(v: np.ndarray) -> np.ndarray:
 
 
 def _norm_text(s: str) -> str:
-    return re.sub(r"[^a-z0-9 ]+", " ", str(s).lower().replace("_", " ")).strip()
+    # runs of whitespace collapse, or punctuation would push a hint off the alias table and onto
+    # the fuzzy stage, which can land it on the class prompt instead of the bank query
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", str(s).lower().replace("_", " "))).strip()
 
 
 STOP = frozenset(("a", "an", "the", "of", "on", "in", "with", "and", "its", "seen", "from",

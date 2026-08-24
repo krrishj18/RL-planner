@@ -46,6 +46,7 @@ class DisasterEnv:
         self.visits: list[VisitRecord] = []
         self._qsched = None
         self._q_rng: np.random.Generator | None = None
+        self._base_queries = tuple(self.cfg.rayfronts.queries)
         self.reset(seed)
 
     # ---- reset --------------------------------------------------------------------------------
@@ -54,6 +55,11 @@ class DisasterEnv:
             self.seed = int(seed)
         self.rng = np.random.default_rng(self.seed)
         self.planner.cache.clear()
+        if self.cfg.queries_dynamic.enabled:
+            # a scheduled episode leaves its own draw on the config; the next one starts from the
+            # mission list again, or the table would be rebuilt for a name only the last episode's
+            # bank knew (a noised draw does not exist in a fresh table)
+            self.cfg.rayfronts.queries = self._base_queries
         rf = RayFrontsSim(self.raster, self.cfg, self.rng)
         rf.prof = self.prof
         self.rf = rf

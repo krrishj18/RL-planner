@@ -53,9 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--config", default=None, help="EnvConfig yaml")
     ap.add_argument("--dynamic-queries", action="store_true",
                     help="sample and edit the mission queries per episode (EnvConfig.queries_dynamic)")
-    ap.add_argument("--dq-every", type=int, default=10, help="decisions between query edit draws")
-    ap.add_argument("--dq-noise", type=float, default=0.0,
-                    help="per-dim noise on a drawn query embedding")
+    ap.add_argument("--dq-every", type=int, default=None,
+                    help="decisions between query edit draws (default: whatever the config says)")
+    ap.add_argument("--dq-noise", type=float, default=None,
+                    help="per-dim noise on a drawn query embedding (default: the config's)")
     ap.add_argument("--scenes", default="synthetic:0-200", nargs="+")
     ap.add_argument("--robots", default="3")
     ap.add_argument("--t-max", default=None)
@@ -143,10 +144,12 @@ def main(argv=None) -> int:
     if not a.use_local:
         cfg.tokens.local_size = 0
     cfg.tokens.robot_bev_size = int(a.robot_bev_size) if a.use_robot_bev else 0
-    if a.dynamic_queries:
+    if a.dynamic_queries:                        # the flag switches it on; the yaml keeps the rest
         cfg.queries_dynamic.enabled = True
-        cfg.queries_dynamic.every = int(a.dq_every)
-        cfg.queries_dynamic.noise_std = float(a.dq_noise)
+        if a.dq_every is not None:
+            cfg.queries_dynamic.every = int(a.dq_every)
+        if a.dq_noise is not None:
+            cfg.queries_dynamic.noise_std = float(a.dq_noise)
     lo, hi = parse_robots(a.robots)
     t_spec = parse_t_max(a.t_max)
     bank = SceneBank(a.scenes, t_max_cap=a.t_max_cap)

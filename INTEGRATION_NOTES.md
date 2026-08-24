@@ -88,4 +88,6 @@ additive and backward compatible:
   observation rebuild) plus the public rebuild; `reset` draws the initial subset before the first
   observation is built and `step` applies an edit at the decision boundary, both no-ops while the
   block is disabled. The public `set_queries(names, weights) -> TeamObs` signature and semantics
-  are unchanged.
+  are unchanged. With the block enabled, `reset` first restores `cfg.rayfronts.queries` to the
+  mission list the env was built with: the schedule writes its draw onto the config, and the next
+  episode would otherwise build its embedding table from a noised name no fresh table knows.

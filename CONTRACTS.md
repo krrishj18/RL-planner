@@ -386,7 +386,9 @@ that, both going through `DisasterEnv.set_queries` and nothing else:
   `p_edit`; `noise_std > 0` registers a jittered copy of a pool query in the embedding table's bank
   under a name hashed from its vector (so two envs sharing the cached table can never give one name
   two meanings). It is a function of `np.random.default_rng([env.seed, …])`, so a seed fixes the
-  whole schedule. Off, `DisasterEnv` never calls it and every run reproduces bit-for-bit.
+  whole schedule. `reset` restores the *mission* list before the belief is rebuilt, so an episode's
+  draw is never the next episode's embedding table — a noised name exists only in the bank of the
+  table it was drawn against. Off, `DisasterEnv` never calls it and every run reproduces bit-for-bit.
 - **`llm/hint_agent.py: HintAgent` + `HintController`** — the closed loop. `digest.py` turns the
   live belief into a length-capped text digest (new-this-interval rays and segments summarised by
   **nearest-class decode**, coverage, casualties found by container, the current list with its
@@ -397,7 +399,9 @@ that, both going through `DisasterEnv.set_queries` and nothing else:
   `set_queries(("crushed vehicle", …))` legal. The decode is **for the LLM's eyes only** — the
   policy still receives raw `feat[D]`. The agent never picks a target, a waypoint or a token, and
   any backend failure (missing CLI, timeout, non-zero exit, unparseable output) returns no-op edits
-  and a warning; it never raises into an episode. The active list is capped at `tokens.max_queries`.
+  and a warning; it never raises into an episode. The active list is capped at `tokens.max_queries`,
+  weights are clamped to [0, 1], and a removal that would empty the list is refused (the sim rejects
+  an empty query list, and the agent's list must not drift from the env's).
 - `scripts/llm_hints_eval.py` evaluates one policy under `none` (the query block zeroed on the
   observation handed to the policy) / `static` / `llm` / `scripted`, prints the `train/evaluate.py`
   table and writes the query-edit log to CSV + JSONL.

@@ -84,8 +84,10 @@ def build_digest(state, since_t: float = 0.0, max_chars: int = DIGEST_MAX_CHARS,
 
     rays = list(state.ray_targets or [])
     segs = list(state.segments or [])
-    new_rays = [r for r in rays if float(r.t_first) >= since_t]
-    new_segs = [s for s in segs if float(s.t_first) >= since_t]
+    # half-open interval: an item first seen exactly at `since_t` was reported by the previous
+    # digest (segments are stamped on the decision boundary), so only t=0 takes the closed end
+    new_rays = [r for r in rays if float(r.t_first) > since_t or since_t <= 0.0]
+    new_segs = [s for s in segs if float(s.t_first) > since_t or since_t <= 0.0]
 
     lines = [
         f"t {state.t:.0f}/{cfg.t_max_s:.0f} s | decision {state.decision_idx} | "
@@ -106,7 +108,9 @@ def build_digest(state, since_t: float = 0.0, max_chars: int = DIGEST_MAX_CHARS,
     if rays:
         lines.append("strongest live rays: " + ", ".join(_strongest(rays, emb, top_k)))
     out = "\n".join(lines)
-    return out if len(out) <= max_chars else out[: max(0, max_chars - len(TRUNC))] + TRUNC
+    if len(out) <= max_chars:
+        return out
+    return (out[: max(0, max_chars - len(TRUNC))] + TRUNC)[: max(0, max_chars)]
 
 
 def _strongest(rays, emb, top_k: int) -> list[str]:

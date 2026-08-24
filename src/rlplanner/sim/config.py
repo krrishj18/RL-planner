@@ -115,6 +115,9 @@ class RewardConfig:
     revisit_m: float = 15.0           # radius of "the same target" for visits and revisits
     revisit_known_only: bool = True   # only if the visited record had reached this robot in time
     revisit_refund_on_find: bool = True  # ... refunded if that arrival turns up a new casualty
+    revisit_confirmed_only: bool = True  # charged only for records whose visit confirmed a
+                                         # casualty (n_found > 0): an unconfirmed target may still
+                                         # hold one, so going back is search, not waste
 
 
 @dataclass

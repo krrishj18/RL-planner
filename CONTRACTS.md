@@ -333,7 +333,10 @@ found a casualty in one of its redundant cells. A **visited record** is written 
 arrives at a ray or segment target it chose (xy, type, the chosen token's feature, time, the
 casualties *it* found within `revisit_m` during that decision, and who); an **intentional revisit**
 is charged when a robot arrives at the target it chose and that target lies within `revisit_m` of a
-record another robot made earlier — with `reward.revisit_known_only` (default) only if the record
+record another robot made earlier **whose visit confirmed a casualty** (`n_found > 0`;
+`reward.revisit_confirmed_only`, default on: occluded detection is stochastic, so an unconfirmed
+target may still hold a casualty and going back to it is search, not waste) — with
+`reward.revisit_known_only` (default) only if the record
 had reached this robot before the decision started. **Only another robot's record counts**
 (DESIGN_VARIANTS.md D says "another drone"): a robot that flies back to a place it visited itself
 pays nothing, and neither does a record made at or after the arrival instant. A fly-by never triggers it: the check runs on

@@ -218,3 +218,15 @@ it clears nearest-frontier on found and AUC and beats the greedy privileged orac
 collapses (coverage 0.10, reward −256). Combined with H2's zero-shot collapse (0.06), the conclusion is that
 the architecture transfers but the policy must be trained on the target scene distribution.
 Artifacts: `/volume4/dsta/rl-planner/ws_v2_central/runs/ws_central_full/{bc,ft}/`.
+
+## H4 — revisit penalty scoped to confirmed targets (2026-08-24)
+
+H2/H3 showed the penalties suppress the lingering that confirming occluded casualties requires
+(16–23 of 61 rubble-contained finds with penalties vs 31–33 without). Fix: the revisit charge now
+applies only to visited records **whose visit confirmed a casualty** (`n_found > 0`,
+`reward.revisit_confirmed_only`, default on). Rationale: a record marks "a drone went here", not
+"this spot is done" — under stochastic occluded detection (p=0.15/sub-step, `found_hits=2`) a
+teammate may have swept a debris pile and confirmed nothing, and going back is search, not waste;
+returning to a *confirmed* find is unambiguously wasteful. `revisit_refund_on_find` stays as the
+backstop for multi-casualty piles near a confirmed find. The gossip merge already prefers the
+higher-`n_found` copy of a record, so confirmation propagates with the records themselves.

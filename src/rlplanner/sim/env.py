@@ -430,6 +430,8 @@ class DisasterEnv:
         for rec in self._known_visits(rb.idx, rw.revisit_known_only):
             if int(rec.robot) == int(rb.idx) or rec.t >= t:
                 continue
+            if rw.revisit_confirmed_only and rec.n_found <= 0:
+                continue     # unconfirmed: the target may still hold a casualty
             if math.hypot(rec.xy[0] - xy[0], rec.xy[1] - xy[1]) <= rw.revisit_m:
                 self._revisits[rb.idx] += 1
                 if rw.revisit_refund_on_find:

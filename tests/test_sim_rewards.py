@@ -31,12 +31,14 @@ def _env(cfg, seed=0):
     return DisasterEnv(make_synthetic_scene(0, **SCENE), cfg, seed=seed)
 
 
-def _record(env, xy, robot, t=None, share_with=()):
-    """A visited record from `robot`, by default made one second before now."""
+def _record(env, xy, robot, t=None, share_with=(), n_found=1):
+    """A visited record from `robot`, by default made one second before now and *confirmed*
+    (`n_found=1`): the revisit charge only applies to confirmed records (`revisit_confirmed_only`),
+    so tests of the other rules stage a chargeable one. Pass `n_found=0` for an unconfirmed visit."""
     t = env.state.t - 1.0 if t is None else t
     rec = VisitRecord(xy=np.asarray(xy, np.float64), token_type=TOKEN_SEGMENT, token_id=7,
                       feat=np.zeros(env.rf.D, np.float32), t=float(t), robot=int(robot),
-                      seq=len(env.visits), id=len(env.visits))
+                      seq=len(env.visits), id=len(env.visits), n_found=int(n_found))
     env.visits.append(rec)
     if env.comms is not None:
         env.comms.beliefs[robot].add_visit(rec)
@@ -536,3 +538,47 @@ def test_the_refunded_revisit_is_not_charged_in_the_reward():
     m = info["metrics"]
     assert m["intentional_revisits"] == gross and m["revisit_refunds"] == refunds
     assert m["revisit_penalties"] == pytest.approx(rw.revisit_cost * (gross - refunds), abs=1e-9)
+
+
+# ---- confirmed-only revisit --------------------------------------------------------------------
+def test_an_unconfirmed_record_does_not_charge_by_default():
+    """`revisit_confirmed_only` (default): a record whose visit confirmed nothing is free to
+    revisit — occluded detection is stochastic, so the target may still hold a casualty."""
+    env = _env(_cfg())
+    here = env.state.robots[0].pos.copy()
+    rec = _record(env, here, robot=1, n_found=0)
+    env._begin_decision()
+    _arrive(env, 0, here)
+    assert env._revisits[0] == 0
+    rec.n_found = 1                                   # now it is a confirmed target
+    env._begin_decision()
+    _arrive(env, 0, here + np.array([2.0, 0.0]))
+    assert env._revisits[0] == 1
+
+
+def test_confirmed_only_off_restores_the_old_rule():
+    env = _env(_cfg(revisit_confirmed_only=False))
+    here = env.state.robots[0].pos.copy()
+    _record(env, here, robot=1)
+    env._begin_decision()
+    _arrive(env, 0, here)
+    assert env._revisits[0] == 1
+
+
+def test_the_confirmed_copy_wins_the_gossip_merge():
+    """`receive_visited` keeps the higher `n_found`, so a robot that first heard the unconfirmed
+    version is charged once the confirmed copy reaches it."""
+    env = _env(_cfg("range"))
+    here = env.state.robots[0].pos.copy()
+    rec = _record(env, here, robot=1, n_found=0)
+    env.comms.beliefs[0].receive_visited([rec])       # the unconfirmed copy arrives first
+    env._begin_decision()
+    _arrive(env, 0, here)
+    assert env._revisits[0] == 0
+    confirmed = VisitRecord(xy=rec.xy.copy(), token_type=rec.token_type, token_id=rec.token_id,
+                            feat=rec.feat.copy(), t=rec.t, robot=rec.robot, seq=rec.seq,
+                            n_found=2, id=rec.id)
+    env.comms.beliefs[0].receive_visited([confirmed])
+    env._begin_decision()
+    _arrive(env, 0, here + np.array([2.0, 0.0]))
+    assert env._revisits[0] == 1

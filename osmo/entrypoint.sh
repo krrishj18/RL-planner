@@ -38,6 +38,17 @@ nas_sync() {
 }
 $NAS_OK && log "NAS upload enabled -> ${NAS_HOST}:${NAS_DEST}/${TAG}/runs/" || log "NAS upload disabled (no airlab-storage credential)"
 
+# ---- optional: pull a previous run's outputs back from the NAS (RLP_FETCH=tag[,tag2]) ------
+if [ -n "${RLP_FETCH:-}" ] && $NAS_OK; then
+  for t in ${RLP_FETCH//,/ }; do
+    log "fetching ${NAS_DEST}/${t}/runs/ from the NAS"
+    SSHPASS="$AIRLAB_STORAGE_PASS" sshpass -e rsync -rltz --partial --timeout=900 \
+      -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+      "${AIRLAB_STORAGE_USER}@${NAS_HOST}:${NAS_DEST}/${t}/runs/" "runs/" \
+      && log "fetched ${t}" || log "WARN: fetch of ${t} failed"
+  done
+fi
+
 # ---- environment ------------------------------------------------------------------------
 if ! command -v uv >/dev/null; then
   log "installing uv"; curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1

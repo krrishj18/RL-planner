@@ -9,12 +9,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JOB=train; TAG=""; ARGS="--smoke --name smoke_osmo"; SCENES=synthetic; POOL=dsta; CPU=24; GPU=1; MEM=64Gi
 TIMEOUT=12h; KEEP=false; ALLOW_CPU=false; DRY=""; NAS=/volume4/dsta/rl-planner; PRIORITY=NORMAL
-REPO="${RLP_REPO_URL:-}"; BRANCH="${RLP_BRANCH:-main}"
+REPO="${RLP_REPO_URL:-}"; BRANCH="${RLP_BRANCH:-main}"; FETCH=""
 while [ $# -gt 0 ]; do case "$1" in
   --job) JOB=$2; shift 2;; --tag) TAG=$2; shift 2;; --args) ARGS=$2; shift 2;; --scenes) SCENES=$2; shift 2;;
   --pool) POOL=$2; shift 2;; --cpu) CPU=$2; shift 2;; --gpu) GPU=$2; shift 2;; --mem) MEM=$2; shift 2;;
   --timeout) TIMEOUT=$2; shift 2;; --nas) NAS=$2; shift 2;; --priority) PRIORITY=$2; shift 2;;
-  --repo) REPO=$2; shift 2;; --branch) BRANCH=$2; shift 2;;
+  --repo) REPO=$2; shift 2;; --fetch) FETCH=$2; shift 2;; --branch) BRANCH=$2; shift 2;;
   --keep-alive) KEEP=true; shift;; --allow-cpu) ALLOW_CPU=true; shift;; --dry-run) DRY="--dry-run"; shift;;
   *) echo "unknown arg $1"; exit 1;; esac; done
 [ -n "$TAG" ] || TAG="${JOB}_$(date -u +%Y%m%d_%H%M%S)"
@@ -40,7 +40,7 @@ set -x
 osmo workflow submit "$WF" --pool "$POOL" --priority "$PRIORITY" $DRY \
   "${RSYNC_OPT[@]}" \
   --set-env "RLP_REPO_URL=$REPO" "RLP_BRANCH=$BRANCH" "RLP_JOB=$JOB" "RLP_ARGS=$ARGS" "RLP_SCENES=$SCENES" "RLP_RUN_TAG=$TAG" "RLP_NAS_DEST=$NAS" \
-            "RLP_KEEP_ALIVE=$KEEP" "RLP_ALLOW_CPU=$ALLOW_CPU"
+            "RLP_KEEP_ALIVE=$KEEP" "RLP_ALLOW_CPU=$ALLOW_CPU" "RLP_FETCH=$FETCH"
 set +x
 echo "[submit] follow:  osmo workflow logs <id> -f      cancel: osmo workflow cancel <id>"
 echo "[submit] results: ${NAS}/${TAG}/runs/ on airlab-storage"

@@ -259,3 +259,23 @@ unreliable). The channel itself works end-to-end (189 list-changing LLM edits la
 set_queries). To make hints bite: per-disaster casualty-container priors that vary across episodes
 (the query channel becomes the only way to know which prior applies) and/or eval-time novel
 container classes. CSVs: runs/llm_hints_8robot/, runs/oracle_ideal_8robot.csv.
+
+## H6 — ws_v2_big: the PoC margin (2026-08-25)
+
+600-scene bank (200 seeds x 3 disasters, severity 0.3-1.0, 0.3-2 km2), 8 robots, t_max auto <= 3000,
+dynamic queries, confirmed-only revisit. DAgger 8x300 (614k labels, BC 0.20 sampled) -> PPO 500
+updates (1.02M team decisions). 24 held-out episodes, identical (scene, seed) list for every row:
+
+| policy | found | AUC | coverage |
+|---|---|---|---|
+| oracle_ideal (motion bound) | 1.00 | 0.88 | - |
+| **learned (ws_v2_big)** | **0.293 +- 0.026** | **0.173** | 0.82 |
+| lawnmower (waypoint) | 0.25 +- 0.03 | 0.15 | 0.80 |
+| nearest_frontier | 0.22 +- 0.03 | 0.12 | 0.77 |
+| ray_follower | 0.19 +- 0.02 | 0.10 | 0.48 |
+| random | 0.06 | 0.04 | 0.12 |
+
+**+33% found / +44% AUC over nearest-frontier with non-overlapping CIs**, and +17%/+15% over the
+strongest scripted baseline (the strict vertical-strip waypoint lawnmower). BC alone 0.095 greedy:
+the RL stage triples it. Wall: ~3.1 h on 32 CPU + 1 GPU. Artifacts:
+/volume4/dsta/rl-planner/ws_v2_big/runs/; local bank data/scenes_v2_big (deterministic re-export).

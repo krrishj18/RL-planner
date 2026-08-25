@@ -23,6 +23,8 @@ if os.path.exists("runs/lawnmower_waypoint_8robot.csv"):  # true waypoint lawnmo
     for r in rows("runs/lawnmower_waypoint_8robot.csv"):
         if r["policy"] == "lawnmower":
             bl["lawnmower"] = r
+if os.path.exists("runs/baselines_bigbank.csv"):          # 600-scene bank protocol rows
+    bl = {r["policy"]: r for r in rows("runs/baselines_bigbank.csv")}
 fin = rows(f"{SRC}/ft/latest_eval.csv")[0]
 log = rows(f"{SRC}/ft/log.csv")
 
@@ -33,15 +35,17 @@ rw = [float(r["reward"]) for r in ev]
 fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.6))
 a1.plot(up, ff, "-o", color=LEARNED, lw=2.2, ms=5, label="learned policy (in-train eval)")
 for name, ls in (("nearest", "--"), ("lawnmower", ":"), ("ray_follower", "-.")):
+    if name not in bl:
+        continue
     v = float(bl[name]["frac_found"])
     a1.axhline(v, ls=ls, color=HEUR, lw=1.3)
-    a1.annotate(name.replace("_", " "), (202, v), fontsize=8.5, color=HEUR,
+    a1.annotate(name.replace("_", " "), (max(up) + 2, v), fontsize=8.5, color=HEUR,
                 va="bottom", ha="right")
 a1.annotate("ideal oracle (motion-only bound): 1.00, off scale", (0.03, 0.97),
             xycoords="axes fraction", fontsize=8.5, color=PRIV, va="top")
 a1.set_xlabel("PPO update"); a1.set_ylabel("casualties found (fraction)")
 a1.set_title("Held-out v2 cities — found vs training", fontsize=12)
-a1.set_xlim(20, 205); a1.legend(fontsize=9, loc="lower right", frameon=False)
+a1.set_xlim(20, max(up) + 5); a1.legend(fontsize=9, loc="lower right", frameon=False)
 tr_u = [int(r["update"]) for r in log if r["ep_reward"] not in ("nan", "")]
 tr_r = [float(r["ep_reward"]) for r in log if r["ep_reward"] not in ("nan", "")]
 if len(tr_r) > 10:
@@ -55,7 +59,7 @@ a2.set_title("Reward vs training", fontsize=12)
 a2.legend(fontsize=9, loc="lower right", frameon=False)
 for a in (a1, a2):
     a.spines[["top", "right"]].set_visible(False)
-fig.suptitle("8 robots · v2 cities (0.3–2 km²) · DAgger warm-start → MAPPO", fontsize=13, y=1.02)
+fig.suptitle("8 robots · v2 cities (0.3–2 km², 600-scene bank) · DAgger warm-start → MAPPO", fontsize=13, y=1.02)
 fig.savefig("slides/training_curve.png", dpi=220, bbox_inches="tight")
 plt.close(fig)
 print("wrote slides/training_curve.png")
@@ -64,11 +68,14 @@ print("wrote slides/training_curve.png")
 names = {"nearest": "nearest frontier", "ray_follower": "ray follower",
          "segment_seeker": "segment seeker", "random": "random", "lawnmower": "lawnmower"}
 vals = [(names[p], float(bl[p]["frac_found"]), float(bl[p]["frac_found_ci"]), HEUR, None)
-        for p in names]
+        for p in names if p in bl]
 vals.append(("learned policy", float(fin["frac_found"]), float(fin["frac_found_ci"]),
              LEARNED, None))
-ideal = [float(r["frac_found"]) for r in rows("runs/oracle_ideal_8robot.csv")]
-im = float(np.mean(ideal)); ic = 1.96 * float(np.std(ideal)) / max(1, len(ideal)) ** 0.5
+if "oracle_ideal" in bl:
+    im, ic = float(bl["oracle_ideal"]["frac_found"]), float(bl["oracle_ideal"]["frac_found_ci"])
+else:
+    ideal = [float(r["frac_found"]) for r in rows("runs/oracle_ideal_8robot.csv")]
+    im = float(np.mean(ideal)); ic = 1.96 * float(np.std(ideal)) / max(1, len(ideal)) ** 0.5
 vals.append(("ideal oracle*", im, ic, PRIV, "//"))
 vals.sort(key=lambda v: v[1])
 fig, ax = plt.subplots(figsize=(9.5, 4.8))

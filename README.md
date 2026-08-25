@@ -54,7 +54,10 @@ At 8 robots / horizon ≤ 3000 s (`ws_v2_8robot`, dynamic queries on): **0.203 �
 the table vs nearest 0.17, lawnmower 0.16, ray_follower 0.16; the motion-only **`oracle_ideal`**
 bound (all locations known, obstacle-aware flight, arrival = visit) reaches 1.00 in ~11 km of the
 62 km budget — the gap is search + confirmation, not flight time. LLM hint ablation: no lift on the
-closed-set sim (DESIGN_VARIANTS §H5). PPO-from-scratch plateaus at the heuristic level
+closed-set sim (DESIGN_VARIANTS §H5).
+**PoC headline (`ws_v2_big`, DESIGN_VARIANTS §H6)**: 600-scene bank, 8 robots, DAgger 614k labels →
+PPO 500 updates — **0.293 ± 0.026 found / 0.173 AUC** vs waypoint lawnmower 0.25 / 0.15,
+nearest-frontier 0.22 / 0.12 (+33% found, +44% AUC, non-overlapping CIs), motion-only ideal 1.00. PPO-from-scratch plateaus at the heuristic level
 (0.52–0.55 / 0.38); the 7-variant sweep (OSMO) found: reward penalties cost ~0.06–0.10 found (noreward 0.66–0.67 leads every
 comms setting), decentral ≈ central, blackout ≈ −0.05, rays are the sharing payload that matters, and
 noreward PPO-from-scratch matches the warm-start on synthetic (see DESIGN_VARIANTS.md §H2).

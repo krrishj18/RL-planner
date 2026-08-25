@@ -24,49 +24,64 @@ class _A:
     synthetic = None
 
 
-def _zoom(ax, st):
+def _final_extent(scene, cfg, decisions):
+    """Pass 1: run the episode once to get the fixed viewport (final explored bbox)."""
+    env = build_env(scene, cfg, seed=0)
+    policy = build_policy("ray_follower", cfg, seed=0)
+    obs = env.reset()
+    for _ in range(decisions):
+        obs, _, done, _ = env.step(np.asarray(policy.act(obs, env.state)))
+        if done:
+            break
+    st = env.state
     xy = np.concatenate([np.asarray(r.trajectory, float) for r in st.robots], 0)
     x0, y0, x1, y1 = st.scene.region
     lo = np.maximum(xy.min(0) - ZOOM_PAD, (x0, y0))
     hi = np.minimum(xy.max(0) + ZOOM_PAD, (x1, y1))
-    side = max(hi[0] - lo[0], hi[1] - lo[1], 4 * ZOOM_PAD)
-    cx, cy = 0.5 * (lo + hi)
-    ax.set_xlim(max(x0, cx - side / 2), min(x1, cx + side / 2))
-    ax.set_ylim(max(y0, cy - side / 2), min(y1, cy + side / 2))
+    return (float(lo[0]), float(hi[0]), float(lo[1]), float(hi[1]))
+
+
+DECISIONS, EVERY, FPS = 240, 2, 4
 
 
 def main():
     cfg = EnvConfig()
     cfg.robot.n_robots = 3
     scene = load_scene(_A)
+    ext = _final_extent(scene, cfg, DECISIONS)
     env = build_env(scene, cfg, seed=0)
     policy = build_policy("ray_follower", cfg, seed=0)
     obs = env.reset()
     frames = []
-    fig, ax = plt.subplots(figsize=(7.8, 8.4), dpi=100)
-    for d in range(1, 161):
+    h = 8.4
+    w = max(5.5, 1.2 + (h - 1.4) * (ext[1] - ext[0]) / (ext[3] - ext[2]))
+    fig, ax = plt.subplots(figsize=(w, h), dpi=100)
+    fig.subplots_adjust(bottom=0.16)
+    for d in range(1, DECISIONS + 1):
         obs, _, done, _ = env.step(np.asarray(policy.act(obs, env.state)))
         st = env.state
-        if d % 2 == 0 or done:
+        if d % EVERY == 0 or done:
             ax.clear()
-            draw_belief_panel(ax, st, query_idx="rubble", focus_robot=0, legend=(d <= 2))
-            _zoom(ax, st)
+            for lg in fig.legends:
+                lg.remove()
+            draw_belief_panel(ax, st, query_idx="rubble", focus_robot=0, legend=False)
+            ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
             live = int(st.rays.live().sum()) if st.rays is not None and st.rays.n else 0
-            ax.set_title(f"RayFronts emulation — decision {d}   t={st.t:.0f}s   "
-                         f"cov={100 * st.coverage:.1f}%   rays={live}   "
-                         f"frontiers={len(st.frontier_clusters)}   "
-                         f"found={n_found(st)}/{st.n_casualties}", fontsize=10)
-            if len(frames) == 0:
-                ax.legend(handles=belief_legend_handles(), loc="upper left", fontsize=7,
-                          frameon=True)
+            ax.set_title(f"t={st.t:.0f}s  cov {100 * st.coverage:.1f}%  rays {live}  "
+                         f"frontiers {len(st.frontier_clusters)}  "
+                         f"found {n_found(st)}/{st.n_casualties}", fontsize=9)
+            fig.legend(handles=belief_legend_handles(), loc="lower center", ncol=4,
+                       fontsize=6.8, frameon=False, bbox_to_anchor=(0.5, 0.005))
             fig.canvas.draw()
             frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
-            print(f"frame {len(frames)} d={d} t={st.t:.0f}s", flush=True)
+            if len(frames) % 20 == 0:
+                print(f"frame {len(frames)} d={d} t={st.t:.0f}s", flush=True)
         if done:
             break
     plt.close(fig)
-    imageio.mimsave("slides/rayfronts.gif", frames, fps=6, loop=0)
+    imageio.mimsave("slides/rayfronts.gif", frames, fps=FPS, loop=0)
     imageio.imwrite("slides/rayfronts_gif_mid.png", frames[len(frames) // 2])
+    imageio.imwrite("slides/rayfronts_gif_late.png", frames[-1])
     print("wrote slides/rayfronts.gif", len(frames), "frames")
 
 

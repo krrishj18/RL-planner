@@ -614,8 +614,8 @@ class LiveViewer:
         chosen = np.zeros((0, 2))
         shown: set[int] = set()
         if obs is not None and r < obs.token_mask.shape[0]:
-            act = int(self.decision_actions[r]) if (self.decision_actions is not None
-                                                    and r < len(self.decision_actions)) else None
+            a_ = self.decision_actions
+            act = (int(a_[r]) if a_ is not None and np.ndim(a_) == 1 and r < len(a_) else None)
             for k in np.flatnonzero(obs.token_mask[r]):
                 xy = np.asarray(obs.token_xy[r, k], float)
                 if not np.all(np.isfinite(xy)):

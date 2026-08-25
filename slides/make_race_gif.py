@@ -92,8 +92,7 @@ def run_ideal(scene):
 def main():
     scene = schema.Scene.from_json(SCENE)
     runs = {"ideal oracle (knows all)": run_ideal(scene)}
-    for label, name in (("learned policy", "learned"), ("lawnmower", "lawnmower"),
-                        ("nearest frontier", "nearest")):
+    for label, name in (("learned policy", "learned"), ("nearest frontier", "nearest")):
         print("running", label, flush=True)
         runs[label] = run_env_policy(scene, name)
     env = DisasterEnv(scene, make_cfg(scene), seed=0)
@@ -105,8 +104,8 @@ def main():
     ext = r.region[::2] + r.region[1::2]
     t_max = runs["learned policy"]["t_max"]
     frames = []
-    order = ["ideal oracle (knows all)", "learned policy", "lawnmower", "nearest frontier"]
-    fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.6))
+    order = ["ideal oracle (knows all)", "learned policy", "nearest frontier"]
+    fig, axes = plt.subplots(1, 3, figsize=(16.2, 6.1))
     for t in np.linspace(0, t_max, N_FRAMES):
         for ax, label in zip(axes.flat, order):
             ax.clear()

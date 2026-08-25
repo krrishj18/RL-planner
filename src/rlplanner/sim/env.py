@@ -16,8 +16,8 @@ from .raster import Raster, rasterize
 from .rayfronts_sim import RayFrontsSim
 from .sensor import observable_mask
 from .comms import CommsSim
-from .state import (CASUALTY_ROLE_ID, F_FEAT0, TOKEN_HOLD, TOKEN_RAY, TOKEN_SEGMENT, EnvState,
-                    Event, RobotState, TeamObs, VisitRecord)
+from .state import (CASUALTY_ROLE_ID, F_FEAT0, TOKEN_FRONTIER, TOKEN_HOLD, TOKEN_RAY,
+                    TOKEN_SEGMENT, EnvState, Event, RobotState, TeamObs, VisitRecord)
 from .tokens import TokenBuilder, team_view
 
 
@@ -250,14 +250,20 @@ class DisasterEnv:
         st = self.state
         if st is None:
             raise RuntimeError("DisasterEnv.step called before reset")
-        a = np.asarray(actions).reshape(-1)
+        raw = np.asarray(actions)
         robots = st.robots
+        # float [n_robots, 2] = direct waypoints; anything else is the token-index action
+        waypoints = raw.ndim == 2 and raw.shape[1] == 2 and raw.dtype.kind == "f"
+        a = raw.astype(np.float64) if waypoints else raw.reshape(-1)
         if a.shape[0] != len(robots):
             raise ValueError(f"step: expected {len(robots)} actions, got {a.shape[0]}")
         obs = st.last_obs
         ev: list[Event] = []
         assigned: list[np.ndarray | None] = []
         for r, rb in enumerate(robots):
+            if waypoints:
+                assigned.append(self._set_waypoint(rb, a[r], ev, st.t))
+                continue
             k = int(a[r])
             if k < 0 or k >= obs.token_mask.shape[1]:
                 raise ValueError(f"step: robot {r} action {k} out of range [0, {obs.token_mask.shape[1]})")
@@ -265,6 +271,7 @@ class DisasterEnv:
                 raise ValueError(f"step: robot {r} selected masked token {k} "
                                  f"(type={int(obs.token_type[r, k])}, id={int(obs.token_id[r, k])})")
             rb.last_action = k
+            rb.target_waypoint = False
             ttype = int(obs.token_type[r, k])
             rb.target_token_type = ttype
             rb.target_id = int(obs.token_id[r, k])
@@ -277,7 +284,9 @@ class DisasterEnv:
                 rb.target_xy = obs.token_xy[r, k].astype(np.float64)
                 self._plan(rb, ev, st.t)
         if self.cfg.record_events:
-            ev.append(Event(st.t, "decision", {"actions": a.astype(int).tolist()}))
+            ev.append(Event(st.t, "decision",
+                            {"waypoints" if waypoints else "actions":
+                             a.tolist() if waypoints else a.astype(int).tolist()}))
 
         n_found0 = self._n_found()
         self._begin_decision()
@@ -354,7 +363,7 @@ class DisasterEnv:
         obs = self.builder.build(self.rf, robots, st.t, self.planner, views=views)
         self._tick("tokens", t0)
         st.last_obs = obs
-        st.last_actions = a.astype(np.int64)
+        st.last_actions = a if waypoints else a.astype(np.int64)
         info = {
             "new_found": int(new_found), "found_total": int(n_found),
             "n_casualties": self._n_casualties, "coverage": self.coverage(),
@@ -372,6 +381,25 @@ class DisasterEnv:
             "link_frac": self.comms.stats.link_frac if self.comms is not None else 1.0,
         }
         return obs, float(reward), done, info
+
+    def _set_waypoint(self, rb: RobotState, xy, ev: list[Event], t: float):
+        """One row of a waypoint action -> the robot's goal. NaN = hold. -> the assigned xy."""
+        rb.last_action = -1
+        rb.target_feat = None
+        rb.target_id = -1
+        if not np.isfinite(xy).all():
+            rb.target_waypoint = False
+            rb.target_token_type = TOKEN_HOLD
+            rb.target_xy = None
+            rb.path = []
+            return None
+        gx, gy = self.raster.clip_xy(float(xy[0]), float(xy[1]))
+        rb.target_waypoint = True
+        rb.target_token_type = TOKEN_FRONTIER      # routed like one; `target_waypoint` is what
+                                                   # suppresses the visit and the revisit
+        rb.target_xy = goal = np.array([gx, gy], np.float64)
+        self._plan(rb, ev, t)                      # may clear target_xy (unreachable)
+        return goal
 
     def _n_found(self) -> int:
         return int(np.count_nonzero(self._cas & self.rf.human_found))
@@ -459,6 +487,9 @@ class DisasterEnv:
     def _on_arrive(self, rb: RobotState, t: float) -> None:
         """A robot reached the target it chose: record the visit, and charge an intentional
         revisit if another robot had already been there."""
+        if rb.target_waypoint:
+            return      # a waypoint is a place to fly through, not a target the robot chose to
+                        # inspect: it names no map item, so it records nothing and owes nothing
         rw = self.cfg.reward
         xy = np.asarray(rb.target_xy, np.float64).copy()
         p0 = self._dec_pos0[rb.idx]

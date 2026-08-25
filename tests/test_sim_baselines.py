@@ -1,8 +1,11 @@
 """The coverage and assignment baselines: `lawnmower` and `oracle_assign` (CONTRACTS.md 7).
 
-The divert tests drive `LawnmowerPolicy.act` on a hand-built `TeamObs` rather than an episode: a
-far-field human ray needs an `open`-visibility casualty to land in one 20 degree bin at the right
-range, which is not something a scene seed can be asked for reproducibly.
+`lawnmower` acts in **waypoints** — float `[n_robots, 2]` world points, nan = hold — so its tests
+read the points it flies to, not a token index. The divert tests drive `LawnmowerPolicy.act` on a
+hand-built `TeamObs` rather than an episode: a far-field human ray needs an `open`-visibility
+casualty to land in one 20 degree bin at the right range, which is not something a scene seed can
+be asked for reproducibly. `_obs` puts a token whose normalised position is `(xn, yn)` at the world
+point `(xn, yn) * 100`, so an expected waypoint reads straight off the item list.
 """
 from __future__ import annotations
 
@@ -39,6 +42,12 @@ def _scene(seed=0, region=REGION, n_casualties=6, n_bystanders=3):
                                 n_bystanders=n_bystanders)
 
 
+def _flat(region=REGION):
+    """An empty, undamaged region: the scene a textbook sweep should cover completely."""
+    return Scene(meta=Meta(region=(0.0, 0.0, region[0], region[1])),
+                 damage_field=DamageField(kind="uniform", params={"inside": 0.0}))
+
+
 def _episode(env, policy, seed=0, n=None):
     obs = env.reset(seed)
     policy.reset(seed)
@@ -50,12 +59,29 @@ def _episode(env, policy, seed=0, n=None):
             return obs, info, k
 
 
+def _waypoint_episode(env, policy, seed=0, count_diverts=False):
+    """One episode of a waypoint policy -> the [decisions, n_robots, 2] points it flew to."""
+    obs = env.reset(seed)
+    policy.reset(seed)
+    out, diverts = [], 0
+    while True:
+        a = policy.act(obs, env.state)
+        out.append(np.asarray(a, np.float64).copy())
+        diverts += len(policy._chasing)
+        obs, _, done, info = env.step(a)
+        if done:
+            w = np.array(out)
+            return (w, info, diverts) if count_diverts else (w, info)
+
+
 # ---- a hand-built observation ------------------------------------------------------------------
-def _obs(items, n_robots=1, dim=D):
+def _obs(items, n_robots=1, dim=D, region=None, pos=None):
     """`items` = list of (type, id, x_norm, y_norm, dist_norm, class_name|None) per robot slot.
 
     A `class_name` gives the token the unit class embedding of that class, which is exactly what a
-    ray of that class carries; `None` leaves the feature tail zero.
+    ray of that class carries; `None` leaves the feature tail zero. `region` fills the observation's
+    own `(x0, y0, x1, y1)` metadata and `pos` the robot poses `robot_feat` carries in [-1, 1] — the
+    two things the waypoint sweep reads. Without a region there is nothing to cut into strips.
     """
     emb = get_embedding_table(EnvConfig().rayfronts.queries, dim=dim)
     K = max(len(items), 1) if not isinstance(items[0], list) else max(len(x) for x in items)
@@ -74,14 +100,31 @@ def _obs(items, n_robots=1, dim=D):
             mask[r, k] = True
             tt[r, k], tid[r, k] = ty, i
             xy[r, k] = (xn * 100.0, yn * 100.0)
+    rfeat = np.zeros((n_robots, 18), np.float32)
+    reg = None
+    if region is not None:
+        reg = np.asarray(region, np.float32)
+        x0, y0, x1, y1 = (float(v) for v in reg)
+        if x1 > x0 and y1 > y0:
+            p = (np.zeros((n_robots, 2)) if pos is None
+                 else np.asarray(pos, np.float64).reshape(n_robots, 2))
+            rfeat[:, 0] = 2.0 * (p[:, 0] - x0) / (x1 - x0) - 1.0
+            rfeat[:, 1] = 2.0 * (p[:, 1] - y0) / (y1 - y0) - 1.0
     return TeamObs(tokens=tok, token_mask=mask, token_xy=xy, token_type=tt, token_id=tid,
-                   robot_feat=np.zeros((n_robots, 18), np.float32),
-                   bev=np.zeros((1, 4, 4), np.float32),
+                   robot_feat=rfeat, bev=np.zeros((1, 4, 4), np.float32),
                    query_emb=np.zeros((8, dim), np.float32), query_w=np.zeros(8, np.float32),
-                   query_mask=np.zeros(8, np.bool_), t=0.0)
+                   query_mask=np.zeros(8, np.bool_), t=0.0, region=reg)
 
 
 HOLD = (TOKEN_HOLD, -1, 0.0, 0.0, 0.0, None)
+
+
+def _stub_state(region=(0.0, 0.0, 200.0, 200.0), pos=(0.0, 0.0), n=1):
+    """The only three things the sweep reads off the state: the region, the sensor and the pose."""
+    return SimpleNamespace(cfg=EnvConfig(), emb=None,
+                           raster=SimpleNamespace(region=region),
+                           robots=[SimpleNamespace(pos=np.asarray(pos, np.float64))
+                                   for _ in range(n)])
 
 
 # ---- registration -------------------------------------------------------------------------------
@@ -90,6 +133,9 @@ def test_both_policies_are_registered():
     assert {"lawnmower", "oracle_assign"} <= set(POLICIES)
     assert not make_policy("lawnmower").privileged
     assert make_policy("oracle_assign").privileged
+    # the action shape is a class fact, so a caller can branch on it without running an episode
+    assert getattr(POLICIES["lawnmower"], "waypoint_policy", False)
+    assert not getattr(POLICIES["oracle_assign"], "waypoint_policy", False)
 
 
 def test_oracle_assign_needs_the_state():
@@ -98,112 +144,154 @@ def test_oracle_assign_needs_the_state():
         make_policy("oracle_assign").act(env.state.last_obs, None)
 
 
-# ---- lawnmower: the sweep -----------------------------------------------------------------------
+# ---- lawnmower: the waypoint sweep ---------------------------------------------------------------
+def test_lawnmower_acts_in_waypoints_not_tokens():
+    """A stripe pattern flies over ground that is already mapped, where no token is ever offered:
+    the action is a world point (CONTRACTS.md 6), one row per robot."""
+    env = DisasterEnv(_scene(), _cfg(robots=3))
+    assert LawnmowerPolicy.waypoint_policy
+    a = make_policy("lawnmower").act(env.state.last_obs, env.state)
+    assert a.shape == (3, 2) and a.dtype.kind == "f"
+
+
+def test_the_strips_partition_the_region():
+    """`strips` is the partition itself, exposed so a viewer draws the same one the sweep flies."""
+    reg = (10.0, -5.0, 210.0, 95.0)
+    for n in (1, 2, 3, 7, 10):
+        st = LawnmowerPolicy.strips(reg, n)
+        assert len(st) == n
+        assert st[0][0] == pytest.approx(reg[0]) and st[-1][1] == pytest.approx(reg[2])
+        w = [hi - lo for lo, hi in st]
+        assert max(w) - min(w) < 1e-9                        # equal width
+        for i in range(1, n):
+            assert st[i][0] == pytest.approx(st[i - 1][1])   # contiguous and disjoint
+    assert LawnmowerPolicy.strips(None, 3) is None
+    assert LawnmowerPolicy.strips((0.0, 0.0, 0.0, 10.0), 3) is None      # degenerate: no strips
+
+
+def test_the_waypoint_list_is_a_vertical_serpentine():
+    """Four 50 m lanes over a 200 m region: +y on an even lane, -y on an odd one, the ends inset
+    half a swath so the footprint still reaches the boundary."""
+    way = LawnmowerPolicy(swath_m=50.0)._strip_lanes((0.0, 0.0, 200.0, 200.0), 1, 0, 50.0)
+    assert way.tolist() == [[25.0, 25.0], [25.0, 175.0], [75.0, 175.0], [75.0, 25.0],
+                            [125.0, 25.0], [125.0, 175.0], [175.0, 175.0], [175.0, 25.0]]
+
+
+def test_every_robot_gets_its_own_lanes():
+    pol = LawnmowerPolicy(swath_m=50.0)
+    reg = (0.0, 0.0, 200.0, 200.0)
+    xs = [np.unique(pol._strip_lanes(reg, 4, r, 50.0)[:, 0]).tolist() for r in range(4)]
+    assert xs == [[25.0], [75.0], [125.0], [175.0]]
+
+
 def test_lawnmower_sweeps_an_empty_scene_to_full_coverage():
-    sc = Scene(meta=Meta(region=(0.0, 0.0, 160.0, 160.0)),
-               damage_field=DamageField(kind="uniform", params={"inside": 0.0}))
-    env = DisasterEnv(sc, _cfg(robots=3, t_max=400.0))
-    _, info, _ = _episode(env, make_policy("lawnmower"))
+    env = DisasterEnv(_flat((160.0, 160.0)), _cfg(robots=3, t_max=400.0))
+    _, info = _waypoint_episode(env, make_policy("lawnmower"))
     assert info["coverage"] > 0.95
 
 
 @pytest.mark.parametrize("robots", [1, 8, 10])      # 10 = the largest EnvConfig.validate allows
 def test_lawnmower_runs_from_one_robot_to_the_largest_team(robots):
     env = DisasterEnv(_scene(), _cfg(robots=robots, t_max=120.0))
-    obs, info, _ = _episode(env, make_policy("lawnmower"))
-    assert obs.n_robots == robots
-    assert np.isfinite(obs.tokens).all() and info["coverage"] > 0.0
+    w, info = _waypoint_episode(env, make_policy("lawnmower"))
+    assert w.shape[1:] == (robots, 2) and info["coverage"] > 0.0
 
 
-def test_lawnmower_targets_stay_in_the_robots_band():
-    """Whenever an in-band frontier is on offer, the chosen token is in that band."""
-    env = DisasterEnv(_scene(region=(200.0, 200.0)), _cfg(robots=3, t_max=200.0))
+@pytest.mark.parametrize("robots", [1, 8])
+def test_the_sweep_is_piecewise_constant_x_lanes_inside_a_disjoint_strip(robots):
+    """The lawnmower property itself: on an empty scene each robot's waypoints are a handful of
+    lane x values no more than a swath apart, alternating between the two ends of the region in y,
+    all inside its own strip — and the ride between them is the lane, not a zig-zag."""
+    cfg = _cfg(robots=robots, t_max=900.0)
+    cfg.rayfronts.p_fp_ray = 0.0        # a spurious person ray would (rightly) divert off the lane
+    env = DisasterEnv(_flat((240.0, 240.0)), cfg)
     pol = make_policy("lawnmower")
-    obs = env.reset(0)
-    pol.reset(0)
-    inband, total = 0, 0
-    while True:
-        act = pol.act(obs, env.state)
-        band = 2.0 / obs.n_robots
-        for r in range(obs.n_robots):
-            lo = -1.0 + band * r
-            hi = 1.0 + 1e-6 if r == obs.n_robots - 1 else lo + band
-            yn = obs.tokens[r, :, F_YABS]
-            frontier = obs.token_mask[r] & (obs.token_type[r] == TOKEN_FRONTIER)
-            k = int(act[r])
-            if not (frontier & (yn >= lo) & (yn < hi)).any():
-                continue
-            if int(obs.token_type[r, k]) != TOKEN_FRONTIER:
-                continue
-            total += 1
-            inband += int(lo <= float(obs.tokens[r, k, F_YABS]) < hi)
-        obs, _, done, _ = env.step(act)
-        if done:
-            break
-    # the only way out of the band is a lower-index robot's position claim on the frontier the
-    # sweep wanted (bands touch, and the claim radius is 15 m)
-    assert total > 20 and inband / total > 0.9
+    w, _ = _waypoint_episode(env, pol)
+    swath = pol._swath(env.state)
+    strips = LawnmowerPolicy.strips(env.raster.region, robots)
+    seen = []
+    for r in range(robots):
+        pts = w[:, r][np.isfinite(w[:, r]).all(axis=1)]
+        assert pts.size, r
+        lanes = np.unique(np.round(pts[:, 0], 6))
+        assert (lanes >= strips[r][0]).all() and (lanes <= strips[r][1]).all()
+        d = np.diff(lanes)
+        assert d.size == 0 or ((d <= swath + 1e-6).all() and (d >= 0.5 * swath).all())
+        assert np.unique(np.round(pts[:, 1], 6)).size == 2       # the two ends of the strip in y
+        seen.append(lanes)
+        traj = np.array(env.state.robots[r].trajectory)
+        inside = (traj[:, 0] >= strips[r][0] - 1e-9) & (traj[:, 0] <= strips[r][1] + 1e-9)
+        first = int(np.argmax(inside))
+        assert inside.any() and inside[first:].all(), r    # once in its strip it never leaves it
+        near = np.abs(traj[first:, 0][:, None] - lanes[None, :]).min(axis=1)
+        assert (near <= 1.0).mean() > 0.7, r
+    for r in range(1, robots):
+        assert seen[r - 1].max() < seen[r].min()             # and no two robots share ground
 
 
-def test_lawnmower_holds_when_nothing_is_on_offer():
-    obs = _obs([HOLD])
-    assert int(make_policy("lawnmower").act(obs, None)[0]) == 0
+def test_a_robot_with_no_region_to_sweep_holds():
+    """No region on the observation and no state to read one off: a waypoint policy that guessed
+    the extent from the tokens it happens to hold would be inventing the map. The row is nan."""
+    a = make_policy("lawnmower").act(_obs([HOLD]), None)
+    assert a.shape == (1, 2) and not np.isfinite(a).any()
 
 
 def test_lawnmower_with_no_tokens_at_all_does_not_crash():
-    obs = _obs([HOLD])
+    obs = _obs([HOLD], region=(0.0, 0.0, 200.0, 200.0))
     obs.token_mask[:] = False
-    assert int(make_policy("lawnmower").act(obs, None)[0]) == 0
+    a = make_policy("lawnmower").act(obs, None)
+    assert a.shape == (1, 2) and np.isfinite(a).all()      # the sweep needs no token
 
 
-def _stub_state(region=(0.0, 0.0, 200.0, 200.0), pos=(0.0, 0.0)):
-    """The only three things the sweep reads off the state: the region, the sensor and the pose."""
-    return SimpleNamespace(cfg=EnvConfig(), emb=None,
-                           raster=SimpleNamespace(region=region),
-                           robots=[SimpleNamespace(pos=np.asarray(pos, np.float64))])
+def test_the_cursor_advances_only_once_the_robot_arrives():
+    reg = (0.0, 0.0, 200.0, 200.0)
+    pol = LawnmowerPolicy(swath_m=100.0, arrive_radius_m=3.0)
+
+    def at(x, y):
+        return pol.act(_obs([HOLD], region=reg, pos=(x, y)),
+                       _stub_state(region=reg, pos=(x, y)))[0]
+
+    assert np.allclose(at(0.0, 0.0), [50.0, 50.0])
+    assert np.allclose(at(10.0, 10.0), [50.0, 50.0])       # still on its way: same waypoint
+    assert np.allclose(at(50.0, 51.0), [50.0, 150.0])      # arrived: the other end of lane 0
+    assert np.allclose(at(50.0, 149.0), [150.0, 150.0])    # ... and on to lane 1
 
 
-def test_lawnmower_sweep_is_a_serpentine_over_the_lanes():
-    """A 200 m band is ~4 sensor swaths: the low lane runs +x, so the leftmost frontier of the
-    *lowest* lane is the next waypoint and a lane-3 frontier further left does not jump the queue."""
-    items = [HOLD,
-             (TOKEN_FRONTIER, 1, 0.9, -0.9, 0.5, None),    # lane 0, far right
-             (TOKEN_FRONTIER, 2, -0.8, -0.9, 0.4, None),   # lane 0, left: next in the order
-             (TOKEN_FRONTIER, 3, -0.9, 0.9, 0.6, None)]    # lane 3, further left still
-    pol = make_policy("lawnmower")
-    pol.min_travel_m = 0.0
-    obs = _obs(items)
-    a = int(pol.act(obs, _stub_state())[0])
-    assert int(obs.token_id[0, a]) == 2
-
-
-def test_lawnmower_resumes_the_sweep_where_it_stopped():
-    """No sweep cursor: the pick is the min-key frontier still on offer, so a divert cannot
-    restart the band — coming back lands on the same token a never-diverted policy picks."""
-    swept = (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.5, None)
-    rest = [HOLD, (TOKEN_FRONTIER, 2, -0.2, -0.9, 0.4, None),
-            (TOKEN_FRONTIER, 3, 0.7, -0.9, 0.6, None)]
-    ray = (TOKEN_RAY, 9, 0.1, 0.1, 0.3, "human_prone")
-
-    pol = make_policy("lawnmower")
-    assert int(pol.act(_obs([HOLD, swept] + rest[1:]), None)[0]) == 1     # first sweep waypoint
-    assert int(pol.act(_obs(rest + [ray]), None)[0]) == 3                 # diverts to the ray
-    fresh = make_policy("lawnmower")
-    assert int(pol.act(_obs(rest), None)[0]) == int(fresh.act(_obs(rest), None)[0]) == 1
+def test_an_unreachable_waypoint_does_not_park_the_robot_forever():
+    """A lane end inside a building leaves A* nothing to plan and the robot does not move; after
+    `_STALL_DECISIONS` motionless sweep decisions the cursor steps past it."""
+    reg = (0.0, 0.0, 200.0, 200.0)
+    pol = LawnmowerPolicy(swath_m=100.0)
+    ob, st = _obs([HOLD], region=reg, pos=(0.0, 0.0)), _stub_state(region=reg, pos=(0.0, 0.0))
+    seen = [pol.act(ob, st)[0].copy() for _ in range(4)]
+    assert np.allclose(seen[0], [50.0, 50.0]) and np.allclose(seen[1], [50.0, 50.0])
+    assert np.allclose(seen[2], [50.0, 150.0]) and np.allclose(seen[3], [50.0, 150.0])
 
 
 # ---- lawnmower: investigate ---------------------------------------------------------------------
 def test_a_human_ray_diverts_the_sweep():
+    """The waypoint becomes the ray's own target point (`_obs` puts a token at (xn, yn) * 100)."""
     items = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.2, None),
              (TOKEN_RAY, 7, 0.5, 0.5, 0.6, "human_prone")]
-    assert int(make_policy("lawnmower").act(_obs(items), None)[0]) == 2
+    assert np.allclose(make_policy("lawnmower").act(_obs(items), None)[0], [50.0, 50.0])
 
 
 def test_a_container_ray_does_not_divert_the_sweep():
     for cls in ("vehicle_toppled", "building_damaged", "debris"):
         items = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.2, None),
                  (TOKEN_RAY, 7, 0.5, 0.5, 0.6, cls)]
-        assert int(make_policy("lawnmower").act(_obs(items), None)[0]) == 1, cls
+        assert not np.isfinite(make_policy("lawnmower").act(_obs(items), None)).any(), cls
+
+
+def test_a_human_ray_outside_the_robots_own_strip_is_ignored():
+    """The partition is strict: a ray across the boundary is a teammate's to investigate, and
+    chasing it would both break the strip and put two robots on one body."""
+    reg = (-100.0, -100.0, 100.0, 100.0)
+    row = [HOLD, (TOKEN_RAY, 7, 0.6, 0.2, 0.5, "human_prone")]      # world (60, 20)
+    obs = _obs([row, list(row)], n_robots=2, region=reg, pos=[(-50.0, 0.0), (50.0, 0.0)])
+    a = make_policy("lawnmower").act(obs, None)
+    assert np.allclose(a[1], [60.0, 20.0])         # robot 1 owns that ground and investigates
+    assert a[0, 0] <= 0.0                          # robot 0 keeps mowing its own strip
 
 
 def test_the_nearest_human_ray_wins():
@@ -211,20 +299,30 @@ def test_the_nearest_human_ray_wins():
              (TOKEN_RAY, 7, 0.5, 0.5, 0.6, "human_standing"),
              (TOKEN_RAY, 8, -0.4, 0.2, 0.25, "human_prone"),
              (TOKEN_RAY, 9, 0.2, -0.3, 0.9, "human_prone")]
-    assert int(make_policy("lawnmower").act(_obs(items), None)[0]) == 3
+    assert np.allclose(make_policy("lawnmower").act(_obs(items), None)[0], [-40.0, 20.0])
 
 
 def test_the_investigation_is_sticky_until_the_ray_goes_away():
     near = (TOKEN_RAY, 8, -0.4, 0.2, 0.25, "human_prone")
     chased = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.2, None), near]
     pol = make_policy("lawnmower")
-    assert int(pol.act(_obs(chased), None)[0]) == 2
+    assert np.allclose(pol.act(_obs(chased), None)[0], [-40.0, 20.0])
     # a nearer human ray appears: the robot stays on the one it is already investigating
     with_nearer = chased + [(TOKEN_RAY, 11, 0.1, 0.1, 0.05, "human_prone")]
-    ob = _obs(with_nearer)
-    assert int(ob.token_id[0, int(pol.act(ob, None)[0])]) == 8
-    # the ray resolves (leaves the token set): back to the sweep
-    assert int(pol.act(_obs(chased[:2]), None)[0]) == 1
+    assert np.allclose(pol.act(_obs(with_nearer), None)[0], [-40.0, 20.0])
+    # the ray resolves (leaves the token set): back to the sweep, which has no region here
+    assert not np.isfinite(pol.act(_obs(chased[:2]), None)).any()
+
+
+def test_the_sweep_resumes_at_the_waypoint_the_divert_interrupted():
+    reg = (-100.0, -100.0, 100.0, 100.0)
+    ray = (TOKEN_RAY, 9, 0.1, 0.1, 0.3, "human_prone")
+    pol = make_policy("lawnmower")
+    st = _stub_state(region=reg, pos=(0.0, 0.0))
+    before = pol.act(_obs([HOLD], region=reg, pos=(0.0, 0.0)), st)[0].copy()
+    assert np.allclose(pol.act(_obs([HOLD, ray], region=reg, pos=(0.0, 0.0)), st)[0], [10.0, 10.0])
+    after = pol.act(_obs([HOLD], region=reg, pos=(0.0, 0.0)), st)[0]
+    assert np.allclose(after, before)              # the cursor did not move while it was away
 
 
 def test_reset_forgets_the_investigation():
@@ -234,7 +332,7 @@ def test_reset_forgets_the_investigation():
     pol.act(_obs(items), None)
     assert pol._chasing
     pol.reset(0)
-    assert not pol._chasing
+    assert not pol._chasing and not pol._cursor
 
 
 def test_human_classification_is_the_argmax_over_the_whole_class_set():
@@ -250,30 +348,23 @@ def test_human_classification_is_the_argmax_over_the_whole_class_set():
         assert bool(hit[2]) == (cid in HUMAN_CLASSES), name
 
 
-def test_two_robots_do_not_chase_the_same_ray():
+def test_only_the_robot_whose_strip_holds_the_ray_investigates_it():
+    reg = (-100.0, -100.0, 100.0, 100.0)
     row = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.5, 0.2, None),
-           (TOKEN_RAY, 7, 0.5, 0.5, 0.6, "human_prone")]
-    obs = _obs([row, list(row)], n_robots=2)
+           (TOKEN_RAY, 7, 0.5, 0.5, 0.6, "human_prone")]              # world (50, 50)
+    obs = _obs([row, list(row)], n_robots=2, region=reg, pos=[(-50.0, 0.0), (50.0, 0.0)])
     a = make_policy("lawnmower").act(obs, None)
-    assert int(a[0]) == 2 and int(a[1]) != 2
+    assert np.allclose(a[1], [50.0, 50.0]) and not np.allclose(a[0], [50.0, 50.0])
 
 
 def test_the_divert_fires_in_a_real_episode():
     """The synthetic-obs tests pin the rule; this one says the rule actually meets a human ray
-    on a live belief (27 of 90 robot-decisions on this seed) and the sweep still covers."""
+    on a live belief and the sweep still covers."""
     env = DisasterEnv(_scene(seed=0, region=(240.0, 240.0)), _cfg(robots=3, t_max=200.0))
     pol = make_policy("lawnmower", queries=env.cfg.rayfronts.queries)
-    obs = env.reset(0)
-    pol.reset(0)
-    diverts = 0
-    while True:
-        a = pol.act(obs, env.state)
-        diverts += int((obs.token_type[np.arange(obs.n_robots), a] == TOKEN_RAY).sum())
-        obs, _, done, info = env.step(a)
-        if done:
-            break
+    _, info, diverts = _waypoint_episode(env, pol, count_diverts=True)
     assert diverts > 0
-    assert info["coverage"] > 0.5
+    assert info["coverage"] > 0.8
 
 
 # ---- oracle_assign ------------------------------------------------------------------------------
@@ -350,7 +441,7 @@ def test_same_seed_gives_identical_trajectories(name):
             if done:
                 break
         runs.append((np.array(acts), np.array(pos)))
-    assert np.array_equal(runs[0][0], runs[1][0])
+    assert np.array_equal(runs[0][0], runs[1][0], equal_nan=runs[0][0].dtype.kind == "f")
     assert np.array_equal(runs[0][1], runs[1][1])
 
 
@@ -365,7 +456,7 @@ def test_the_human_argmax_reads_the_token_feature_width_not_the_query_block(qdim
     obs = _obs(items)
     obs.query_emb = np.zeros((4, qdim), np.float32)
     obs.query_w, obs.query_mask = np.zeros(4, np.float32), np.zeros(4, np.bool_)
-    assert int(make_policy("lawnmower").act(obs, None)[0]) == 2
+    assert np.allclose(make_policy("lawnmower").act(obs, None)[0], [50.0, 50.0])
 
 
 @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
@@ -375,21 +466,28 @@ def test_a_non_finite_ray_feature_never_diverts_and_never_warns(bad):
     obs.tokens[0, 2, F_FEAT0:] = bad
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert int(make_policy("lawnmower").act(obs, None)[0]) == 1
+        assert not np.isfinite(make_policy("lawnmower").act(obs, None)).any()
+
+
+def test_a_ray_with_no_target_point_never_diverts():
+    """`token_xy` is nan for a token that aims at nothing: there is no waypoint to hand the env."""
+    obs = _obs([HOLD, (TOKEN_RAY, 7, 0.5, 0.5, 0.6, "human_prone")])
+    obs.token_xy[0, 1] = np.nan
+    assert not np.isfinite(make_policy("lawnmower").act(obs, None)).any()
 
 
 # ---- lawnmower: degenerate geometry --------------------------------------------------------------
 @pytest.mark.parametrize("alt,depth", [(25.0, 35.0), (34.999, 35.0), (35.0, 35.0), (60.0, 35.0)])
-def test_the_lane_height_stays_finite_when_the_sensor_cannot_reach_the_ground(alt, depth):
+def test_the_lane_spacing_stays_finite_when_the_sensor_cannot_reach_the_ground(alt, depth):
     """`depth_limit <= flight_alt` is a config `validate` rejects, but the swath must not become a
-    nan (sqrt of a negative) or a zero lane height if the sweep is ever handed one."""
+    nan (sqrt of a negative) or a zero lane spacing if the sweep is ever handed one."""
     st = _stub_state()
     st.cfg.robot.flight_alt_m, st.cfg.sensor.depth_limit_m = alt, depth
-    h = LawnmowerPolicy._lane_height(st)
-    assert np.isfinite(h) and h > 0.0
-    items = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.5, None),
-             (TOKEN_FRONTIER, 2, 0.9, 0.9, 0.5, None)]
-    assert int(make_policy("lawnmower").act(_obs(items), st)[0]) in (1, 2)
+    pol = make_policy("lawnmower")
+    w = pol._swath(st)
+    assert np.isfinite(w) and w > 0.0
+    a = pol.act(_obs([HOLD], region=(0.0, 0.0, 200.0, 200.0)), st)
+    assert np.isfinite(a).all()
 
 
 @pytest.mark.parametrize("region", [(0.0, 0.0, 4.0, 4.0),          # a handful of cells
@@ -397,23 +495,25 @@ def test_the_lane_height_stays_finite_when_the_sensor_cannot_reach_the_ground(al
                                     (0.0, 0.0, 500.0, 1500.0),     # tall
                                     (0.0, 0.0, 1500.0, 500.0)])    # wide
 def test_the_sweep_survives_a_degenerate_or_lopsided_region(region):
-    st = _stub_state(region=region)
-    h = LawnmowerPolicy._lane_height(st)
-    assert np.isfinite(h) and h > 0.0
-    items = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.5, None),
-             (TOKEN_FRONTIER, 2, 0.9, 0.9, 0.5, None)]
-    assert int(make_policy("lawnmower").act(_obs(items), st)[0]) in (1, 2)
+    x0, y0, x1, y1 = region
+    pol = make_policy("lawnmower")
+    a = pol.act(_obs([HOLD], region=region), _stub_state(region=region))
+    if x1 <= x0 or y1 <= y0:
+        assert not np.isfinite(a).any()          # nothing to cut into strips: hold
+    else:
+        assert np.isfinite(a).all()
+        assert x0 <= a[0, 0] <= x1 and y0 <= a[0, 1] <= y1
 
 
 @pytest.mark.parametrize("robots", [1, 10])
-def test_every_robot_of_a_crowded_team_picks_a_valid_slot(robots):
-    """Bands thinner than a lane and more robots than the region has lanes: still one valid slot
-    each (the extras hold once every frontier is claimed)."""
-    items = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.5, None),
-             (TOKEN_RAY, 7, 0.5, 0.5, 0.6, "human_prone")]
-    obs = _obs(items, n_robots=robots)
-    a = make_policy("lawnmower").act(obs, None)
-    assert a.shape == (robots,) and obs.token_mask[np.arange(robots), a].all()
+def test_every_robot_of_a_crowded_team_gets_a_waypoint_in_its_own_strip(robots):
+    """Strips thinner than one lane: still exactly one lane each, and no two robots share ground."""
+    reg = (0.0, 0.0, 200.0, 200.0)
+    obs = _obs([HOLD], n_robots=robots, region=reg, pos=[(100.0, 100.0)] * robots)
+    a = make_policy("lawnmower").act(obs, _stub_state(region=reg, pos=(100.0, 100.0), n=robots))
+    assert a.shape == (robots, 2) and np.isfinite(a).all()
+    for r, (lo, hi) in enumerate(LawnmowerPolicy.strips(reg, robots)):
+        assert lo <= a[r, 0] <= hi
 
 
 # ---- lawnmower: the chase ends -------------------------------------------------------------------
@@ -422,17 +522,17 @@ def test_a_chase_that_resolves_mid_flight_moves_to_the_next_human_ray():
     near = (TOKEN_RAY, 8, -0.4, 0.2, 0.25, "human_prone")
     far = (TOKEN_RAY, 9, 0.6, 0.6, 0.8, "human_standing")
     pol = make_policy("lawnmower")
-    assert int(pol.act(_obs(base + [near, far]), None)[0]) == 2      # the nearer one first
-    ob = _obs(base + [far])                                          # it resolves mid-chase
-    assert int(ob.token_id[0, int(pol.act(ob, None)[0])]) == 9       # on to the other one
+    assert np.allclose(pol.act(_obs(base + [near, far]), None)[0], [-40.0, 20.0])   # the nearer one
+    assert np.allclose(pol.act(_obs(base + [far]), None)[0], [60.0, 60.0])          # on to the other
 
 
 def test_the_chase_ends_when_the_ray_falls_inside_the_min_travel_guard():
     base = [HOLD, (TOKEN_FRONTIER, 1, -0.9, -0.9, 0.5, None)]
     pol = make_policy("lawnmower")
-    assert int(pol.act(_obs(base + [(TOKEN_RAY, 8, -0.4, 0.2, 0.25, "human_prone")]), None)[0]) == 2
+    chased = base + [(TOKEN_RAY, 8, -0.4, 0.2, 0.25, "human_prone")]
+    assert np.allclose(pol.act(_obs(chased), None)[0], [-40.0, 20.0])
     arrived = base + [(TOKEN_RAY, 8, -0.4, 0.2, 0.0, "human_prone")]
-    assert int(pol.act(_obs(arrived), None)[0]) == 1                 # arrived: back to the sweep
+    assert not np.isfinite(pol.act(_obs(arrived), None)).any()      # arrived: back to the sweep
     assert not pol._chasing
 
 
@@ -443,38 +543,30 @@ def test_a_ray_id_that_comes_back_as_something_else_drops_the_chase():
     assert pol._chasing[0] == 8
     ob = _obs(base + [(TOKEN_RAY, 8, 0.5, 0.5, 0.6, "vehicle_toppled"),
                       (TOKEN_RAY, 12, -0.3, 0.1, 0.3, "human_standing")])
-    assert int(ob.token_id[0, int(pol.act(ob, None)[0])]) == 12
+    assert np.allclose(pol.act(ob, None)[0], [-30.0, 10.0])
 
 
 def test_a_sweep_that_diverts_to_every_ray_still_covers():
     """The resolution rule is what keeps the divert from livelocking: classify *every* ray as a
-    person and the band is still swept, because a chase ends when the robot arrives."""
+    person and the strip is still swept, because a chase ends when the robot arrives."""
     class AllHuman(LawnmowerPolicy):
         def _human_rays(self, obs, r, cls):
             return obs.token_mask[r] & (obs.token_type[r] == TOKEN_RAY)
     env = DisasterEnv(_scene(region=(200.0, 200.0)), _cfg(robots=3, t_max=300.0))
-    _, info, _ = _episode(env, AllHuman(queries=env.cfg.rayfronts.queries))
+    _, info = _waypoint_episode(env, AllHuman(queries=env.cfg.rayfronts.queries))
     assert info["coverage"] > 0.9
 
 
 def test_the_divert_runs_on_the_robots_own_view_under_range_comms():
     """Nothing in the rule reads the team map, so a blackout changes neither the classification nor
-    the sweep: the robot investigates the human rays its own belief carries."""
+    the sweep: the robot investigates the human rays its own belief carries, inside its own strip."""
     cfg = _cfg(robots=3, t_max=200.0)
     cfg.comms = CommsConfig(mode="range", range_m=0.0)
     env = DisasterEnv(_scene(seed=0, region=(240.0, 240.0)), cfg)
     pol = make_policy("lawnmower", queries=cfg.rayfronts.queries)
-    obs = env.reset(0)
-    pol.reset(0)
-    diverts = 0
-    while True:
-        a = pol.act(obs, env.state)
-        assert obs.token_mask[np.arange(obs.n_robots), a].all()
-        diverts += int((obs.token_type[np.arange(obs.n_robots), a] == TOKEN_RAY).sum())
-        obs, _, done, info = env.step(a)
-        if done:
-            break
-    assert diverts > 0 and info["coverage"] > 0.3
+    w, info, diverts = _waypoint_episode(env, pol, count_diverts=True)
+    assert w.shape[1:] == (3, 2)
+    assert diverts > 0 and info["coverage"] > 0.8
 
 
 # ---- oracle_assign: more edges ------------------------------------------------------------------

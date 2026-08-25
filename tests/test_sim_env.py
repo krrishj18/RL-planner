@@ -9,7 +9,7 @@ from rlplanner.scene.schema import (Building, DamageField, Human, Meta, Road, Sc
 from rlplanner.sim.baselines import POLICIES, make_policy
 from rlplanner.sim.config import EnvConfig
 from rlplanner.sim.env import DisasterEnv
-from rlplanner.sim.state import TOKEN_HOLD
+from rlplanner.sim.state import TOKEN_FRONTIER, TOKEN_HOLD
 from rlplanner.sim.vec_env import VecEnv
 
 
@@ -326,8 +326,118 @@ def test_walled_in_target_is_masked_and_unreachable():
     _run(env, make_policy("ray_follower"))                       # must not crash
 
 
+# ---- waypoint actions (CONTRACTS.md 6) ----------------------------------------------------------
+def _flat_scene(region=(160.0, 160.0), buildings=()):
+    return Scene(meta=Meta(region=(0.0, 0.0, region[0], region[1])),
+                 damage_field=DamageField(kind="uniform", params={"inside": 0.0}),
+                 buildings=list(buildings))
+
+
+def test_the_observation_carries_the_region():
+    """The deployment extent as team metadata, so a waypoint policy need not guess it from the
+    tokens it happens to hold."""
+    env = DisasterEnv(_small_scene(), _cfg())
+    o = env.state.last_obs
+    assert o.region.shape == (4,) and np.allclose(o.region, env.raster.region)
+
+
+def test_a_waypoint_action_routes_the_robot_to_the_point():
+    env = DisasterEnv(_flat_scene(), _cfg(robots=2))
+    rb0, rb1 = env.state.robots
+    goal = rb0.pos + np.array([40.0, 20.0])
+    d0, held = float(np.hypot(*(rb0.pos - goal))), rb1.pos.copy()
+    a = np.full((2, 2), np.nan)
+    a[0] = goal
+    env.step(a)
+    assert rb0.target_waypoint and rb0.target_token_type == TOKEN_FRONTIER
+    assert rb0.target_id == -1 and rb0.last_action == -1 and rb0.target_feat is None
+    assert float(np.hypot(*(rb0.pos - goal))) < d0            # A* routed it towards the point
+    assert not rb1.target_waypoint and rb1.target_xy is None  # the nan row is hold
+    assert np.allclose(rb1.pos, held)
+    assert env.state.last_actions.shape == (2, 2)
+
+
+def test_a_waypoint_outside_the_region_is_clipped():
+    env = DisasterEnv(_flat_scene(), _cfg(robots=1))
+    x0, y0, x1, y1 = env.raster.region
+    env.step(np.array([[x1 + 500.0, y1 + 500.0]], np.float64))
+    tx, ty = env.state.robots[0].target_xy
+    assert x0 <= tx <= x1 and y0 <= ty <= y1
+
+
+def test_an_unreachable_waypoint_holds_and_is_reported():
+    """The same treatment a frontier token target gets: no path, no goal, an `unreachable` event."""
+    tower = Building(id="tower", center=(80.0, 80.0), size=(40.0, 40.0), height_m=60.0)
+    env = DisasterEnv(_flat_scene(buildings=[tower]), _cfg(robots=1))
+    _, _, _, info = env.step(np.array([[80.0, 80.0]], np.float64))
+    rb = env.state.robots[0]
+    assert rb.target_xy is None and rb.path == [] and rb.target_token_type == TOKEN_HOLD
+    assert [e.payload["robot"] for e in info["events_this_step"] if e.kind == "unreachable"] == [0]
+
+
+def test_the_waypoint_is_what_the_metrics_call_the_assigned_point():
+    """`assigned` drives the redundancy metric, so it has to be the waypoint itself."""
+    env = DisasterEnv(_flat_scene(), _cfg(robots=2, team_terms=True))
+    p = env.state.robots[0].pos.copy()
+    _, _, _, i1 = env.step(np.stack([p + np.array([30.0, 0.0]), p + np.array([31.0, 0.0])]))
+    assert i1["metrics"]["redundancy"] == 1.0        # 1 of 1 decision has two targets within 20 m
+    _, _, _, i2 = env.step(np.stack([p + np.array([90.0, 0.0]), p + np.array([0.0, 90.0])]))
+    assert i2["metrics"]["redundancy"] == 0.5        # ... and 1 of 2 after they split up
+
+
+def test_a_waypoint_episode_records_no_visit_and_owes_no_revisit():
+    """A waypoint names no map item: nothing to record and nothing to charge (CONTRACTS.md 6)."""
+    env = DisasterEnv(_small_scene(), _cfg(robots=3, t_max=120.0, team_terms=True))
+    pol = make_policy("lawnmower")
+    obs = env.reset(0)
+    pol.reset(0)
+    while True:
+        obs, _, done, info = env.step(pol.act(obs, env.state))
+        if done:
+            break
+    assert env.visits == [] and info["metrics"]["visits"] == 0
+    assert info["metrics"]["intentional_revisits"] == 0
+    assert not any(rb.target_id != -1 for rb in env.state.robots)
+
+
+def test_the_two_action_shapes_do_not_collide():
+    env = DisasterEnv(_flat_scene(), _cfg(robots=2))
+    with pytest.raises(ValueError):
+        env.step(np.zeros((3, 2), np.float64))            # wrong robot count
+    with pytest.raises(ValueError):
+        env.step(np.zeros((2, 2), np.int64))              # int [n, 2] is 4 token actions, not 2
+    env.step(np.zeros(2, np.int64))                       # ... and the int path still works
+
+
+def test_the_int_action_path_is_unchanged_by_the_waypoint_branch():
+    """Regression for the additive branch in `step`: the reference numbers were recorded from
+    these same episodes before waypoint actions existed, on the same scene and seed."""
+    ref = {"nearest_frontier": (-0.7858005358275456, 0, 0.8382825040128411, 1788.63541438418, 0),
+           "ray_follower": (0.9157588113704965, 2, 0.8007624398073836, 2229.853798908589, 5)}
+    for name, (reward, found, cov, dist, visits) in ref.items():
+        cfg = EnvConfig()
+        cfg.robot.n_robots, cfg.t_max_s = 3, 150.0
+        env = DisasterEnv(make_synthetic_scene(1, region_m=(200.0, 200.0), n_casualties=6,
+                                               n_bystanders=3), cfg, seed=7)
+        pol = make_policy(name, queries=cfg.rayfronts.queries, seed=7)
+        obs = env.reset(7)
+        pol.reset(7)
+        total = 0.0
+        while True:
+            a = pol.act(obs, env.state)
+            assert a.dtype.kind == "i"
+            obs, r, done, info = env.step(a)
+            total += float(r)
+            if done:
+                break
+        assert total == pytest.approx(reward, abs=1e-9), name
+        assert info["found_total"] == found and len(env.visits) == visits, name
+        assert info["coverage"] == pytest.approx(cov, abs=1e-12), name
+        assert sum(rb.dist_travelled for rb in env.state.robots) == pytest.approx(dist, abs=1e-6)
+
 # ---- policies -----------------------------------------------------------------------------------
-@pytest.mark.parametrize("name", sorted(POLICIES))
+@pytest.mark.parametrize("name", sorted(n for n in POLICIES
+                                        if not getattr(POLICIES[n], "waypoint_policy", False)))
 def test_baselines_never_select_a_masked_token(name):
     env = DisasterEnv(_small_scene(), _cfg(t_max=60.0))
     pol = make_policy(name)
@@ -337,6 +447,26 @@ def test_baselines_never_select_a_masked_token(name):
         assert a.shape == (3,) and a.dtype.kind == "i"
         for r, k in enumerate(a):
             assert obs.token_mask[r, k], (name, r, k)
+        obs, _, done, _ = env.step(a)
+        if done:
+            break
+
+
+@pytest.mark.parametrize("name", sorted(n for n in POLICIES
+                                        if getattr(POLICIES[n], "waypoint_policy", False)))
+def test_waypoint_baselines_return_waypoints(name):
+    """The other action shape: float [n_robots, 2] world points, nan = hold (CONTRACTS.md 6)."""
+    env = DisasterEnv(_small_scene(), _cfg(t_max=60.0))
+    pol = make_policy(name)
+    obs = env.state.last_obs
+    x0, y0, x1, y1 = env.raster.region
+    for _ in range(12):
+        a = pol.act(obs, env.state)
+        assert a.shape == (3, 2) and a.dtype.kind == "f"
+        fin = np.isfinite(a).all(axis=1)
+        assert (np.isfinite(a).all(axis=1) == np.isfinite(a).any(axis=1)).all()  # no half rows
+        assert ((a[fin, 0] >= x0) & (a[fin, 0] <= x1)).all()
+        assert ((a[fin, 1] >= y0) & (a[fin, 1] <= y1)).all()
         obs, _, done, _ = env.step(a)
         if done:
             break

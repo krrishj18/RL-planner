@@ -305,6 +305,7 @@ budget is 10 MB per robot and the test asserts it.
 env = DisasterEnv(scene, cfg: EnvConfig, seed=0)
 obs: TeamObs = env.reset(seed=None)
 obs, reward: float, done: bool, info: dict = env.step(actions: np.ndarray[int, (n_robots,)])
+#   ... or actions: np.ndarray[float, (n_robots, 2)]  -- direct waypoints (see below)
 obs = env.set_queries(names, weights=None)   # mission queries only; the belief does not move
 env.state -> EnvState     # live view (do not mutate from outside)
 ```
@@ -370,11 +371,24 @@ sets it in its `train:` block (`sequential_decode`), `scripts/train.py` takes
 `--sequential-decode/--no-sequential-decode` and records it in `args.json` (as
 `policy.sequential_decode`), and the sweep prints it in the summary header. Nothing else
 de-conflicts a decentralised team: what the policy learns from the peer block is the whole of it.
-`VecObs` carries the query block, `local`, `peer_tokens` and `robot_bev` alongside the token
-arrays; `train/par_env.py` ships the same fields (`_OBS_FIELDS`). `ObsBatch` mirrors them, and
+`VecObs` carries the query block, `local`, `peer_tokens`, `robot_bev` and `region` alongside the
+token arrays; `train/par_env.py` ships the same fields (`_OBS_FIELDS`). `ObsBatch` mirrors them, and
 `TokenPolicy(use_peers=..., use_robot_bev=...)` are actor switches like `use_local`.
 `set_queries` never changes an array shape, so envs sharing a config need not switch together and a
 checkpoint keeps loading.
+**Waypoint actions.** `step` also takes a **float `[n_robots, 2]`** array, one world point per
+robot: `target_xy = clip(xy)` into the region, `target_token_type = frontier` and `target_id = -1`,
+routed by the same A* as any token target (an unreachable point raises `unreachable` and the robot
+holds, exactly as a frontier does), and a row of NaNs is hold. A waypoint names no map item, so —
+unlike a ray or segment target — it writes **no visited record and is charged no revisit**; the
+`assigned` point the redundancy metric and the peer block read is the waypoint itself, and
+`last_actions` keeps the `[n, 2]` array. The shapes cannot collide: the int path is taken for any
+non-float action, so every existing episode is byte-identical (regression: `nearest_frontier` and
+`ray_follower` reproduce their pre-waypoint reward, finds, coverage, distance and visit count on
+the same seed). This exists because a **coverage** policy has to fly over ground it has already
+mapped, where the token set offers nothing — the lawnmower baseline of §7 is the user.
+`TeamObs.region` (float `[4]`, `(x0, y0, x1, y1)`) carries the extent such a policy partitions,
+as team metadata rather than something inferred from the tokens a robot happens to hold.
 
 ## 6.1 Query hints and query churn (owner: llm, `rlplanner/llm/`)
 The mission query list is an *input*, so something may edit it while an episode runs. Two users of
@@ -407,7 +421,10 @@ that, both going through `DisasterEnv.set_queries` and nothing else:
   table and writes the query-edit log to CSV + JSONL.
 
 ## 7. Baselines (owner: sim, `sim/baselines.py`)
-`Policy.act(obs: TeamObs, state: EnvState | None) -> np.ndarray[int]`; `privileged: bool`. Simple
+`Policy.act(obs: TeamObs, state: EnvState | None) -> np.ndarray[int]`; `privileged: bool`. A
+policy whose class sets `waypoint_policy = True` returns float `[n_robots, 2]` waypoints instead
+(only `lawnmower`), which `step` accepts directly, so a caller branches on the class attribute
+rather than the array. Simple
 heuristics, one line of arbitration each and **no threshold** — deliberately not a behaviour tree, so
 that what a learned policy adds stays legible. Each skips a candidate already claimed by a
 lower-index robot this step — claimed by target **position** (within 15 m) as well as by
@@ -428,25 +445,45 @@ query tokens); the environment scores nothing.
   is on offer, nearest frontier.
 - `SegmentSeekerPolicy` ("segment_seeker"): the same over the segment tokens.
 - `LawnmowerPolicy` ("lawnmower"): boustrophedon coverage that breaks off for a person it sees.
-  The region is cut into `n_robots` contiguous horizontal bands, robot `r` owning band `r`; inside
-  its band the robot follows a fixed serpentine order (lanes one sensor swath tall, +x on an even
-  lane, -x on an odd one) and the action is **the in-band frontier with the smallest sweep key**.
-  There is no sweep cursor: frontiers vanish as the ground behind them is mapped, so the smallest
-  remaining key *is* the next unswept point and an interrupted sweep resumes instead of restarting.
-  A frontier the robot has effectively reached sorts last (the `min_travel` guard, folded into the
-  key); an empty band falls back to the nearest frontier anywhere; only a robot with no frontier
-  holds. Bands are disjoint, so the position claims only bite on that fallback, and the whole thing
-  runs on the robot's own view — unchanged under range comms and for any `n_robots >= 1`.
-  **Investigate**: a live ray whose feature *is* a person diverts the robot, classified
-  threshold-free as the argmax cosine of the ray token's `feat` over the **whole class-embedding
-  set** (a human ray iff the argmax is `human_standing`/`human_prone`; no score meets a cutoff and
-  no mission query is read, which would make the divert a function of the word list). The nearest
-  such ray wins and the robot stays on it until the ray resolves or its target falls inside the
-  `min_travel` guard, then the sweep resumes at its next waypoint. Only rays divert: only an
-  `open`-visibility human raises a far-field human ray (4), so a casualty in a car, a building or
-  under rubble is a `vehicle_toppled`/`building_damaged`/`debris` ray this baseline sweeps past —
-  the gap a learned policy has to close. Segments do not divert either: at `segment_scale = 40` a
-  body is absorbed by its neighbours and a persistent region with no resolution rule livelocks (12).
+  **It is the one baseline that acts in waypoints** (`waypoint_policy = True`, float `[n, 2]`, see
+  6): a stripe pattern flies over ground that is already mapped, and a token is only ever offered
+  at the edge of the unknown, so the token action space cannot express a lawnmower at all:
+  steering by tokens zig-zags between frontiers.
+  The region (`TeamObs.region`) is cut into `n_robots` contiguous **vertical strips** of equal
+  width — `LawnmowerPolicy.strips(region, n_robots)`, public so a viewer draws the same partition
+  the sweep flies — and robot `r` owns strip `r` for the whole episode. Its strip carries
+  `ceil(strip_width / swath)` evenly spaced vertical lanes and the waypoint list is the lane ends
+  in serpentine order (+y on an even lane, -y on an odd one), the ends inset half a swath so the
+  footprint still reaches the boundary. The swath is the ground width one pass sweeps:
+  `2 * sqrt(depth_limit^2 - flight_alt^2) * sin(hfov / 2)` — the depth limit's horizontal reach,
+  narrowed by the horizontal FoV, because the widest point of a `hfov_deg` wedge sits at
+  `reach * sin(hfov / 2)` off the flight line and lanes a full `2 * reach` apart leave a strip
+  between them unobserved (measured on an empty 240 m scene, 3 robots: 0.89 coverage against 1.00).
+  Every geometry input is a constructor kwarg (`swath_m` pins the spacing outright), defaulting to
+  the running env's config and then to `EnvConfig`'s.
+  A per-robot cursor walks the list, advancing when the robot is within `arrive_radius_m` of the
+  point it is flying to; a lane end A* cannot reach leaves the robot parked, so two motionless
+  sweep decisions advance the cursor past it. **A robot never leaves its strip**: every waypoint it
+  emits is clamped into its own x range and there is no fallback onto a neighbour's ground, so the
+  team de-conflicts by construction and the position claims never bite. A robot with no strip to
+  sweep (a degenerate region, or none on offer) holds — a NaN row; one that reaches the end of its
+  list wraps to lane 0, the lane it swept longest ago, and runs its own serpentine again, which is
+  all a robot with a per-robot view can do: it cannot see which of its lanes the stochastic hit
+  model left unobserved. Unchanged under range
+  comms and for any `n_robots` in 1..10.
+  **Investigate**: a live ray whose feature *is* a person diverts the robot onto that ray's own
+  target point, classified threshold-free as the argmax cosine of the ray token's `feat` over the
+  **whole class-embedding set** (a human ray iff the argmax is `human_standing`/`human_prone`; no
+  score meets a cutoff and no mission query is read, which would make the divert a function of the
+  word list). Only a ray whose target lands **inside the robot's own strip** counts — one across
+  the boundary is a teammate's to investigate, and chasing it would break the partition and put two
+  robots on one body. The nearest such ray wins and the robot stays on it until the ray resolves or
+  its target falls inside the `min_travel` guard, then the sweep resumes at the waypoint it left
+  (the cursor is untouched while it is away). Only rays divert: only an `open`-visibility human
+  raises a far-field human ray (4), so a casualty in a car, a building or under rubble is a
+  `vehicle_toppled`/`building_damaged`/`debris` ray this baseline sweeps past — the gap a learned
+  policy has to close. Segments do not divert either: at `segment_scale = 40` a body is absorbed by
+  its neighbours and a persistent region with no resolution rule livelocks (12).
 - `OraclePolicy(privileged)`: holds while an unfound casualty is inside the camera within the depth
   limit (finding is by hit count, so dwelling is the productive action), else the token closest to
   the nearest unfound casualty — claimed greedily, nearest-first, in robot-index order.

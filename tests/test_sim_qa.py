@@ -503,10 +503,14 @@ def test_baselines_run_without_the_hold_token(name):
     assert env.k_tokens == (cfg.tokens.k_frontier + cfg.tokens.k_ray + cfg.tokens.k_segment
                             + cfg.tokens.k_visited)
     pol = make_policy(name, queries=cfg.rayfronts.queries, seed=0)
+    waypoints = bool(getattr(pol, "waypoint_policy", False))
     obs = env.state.last_obs
     while True:
         a = pol.act(obs, env.state)
-        assert obs.token_mask[np.arange(obs.n_robots), a].all()
+        if waypoints:                     # a waypoint names no token, so no mask to respect
+            assert a.shape == (obs.n_robots, 2) and a.dtype.kind == "f"
+        else:
+            assert obs.token_mask[np.arange(obs.n_robots), a].all()
         obs, _, done, _ = env.step(a)
         if done:
             break
@@ -520,7 +524,11 @@ def test_a_policy_with_no_valid_token_at_all_still_returns_a_slot():
     obs = env.state.last_obs
     obs.token_mask[:] = False
     for name in sorted(POLICIES):
-        a = make_policy(name, queries=cfg.rayfronts.queries, seed=0).act(obs, env.state)
+        pol = make_policy(name, queries=cfg.rayfronts.queries, seed=0)
+        a = pol.act(obs, env.state)
+        if getattr(pol, "waypoint_policy", False):
+            assert a.shape == (1, 2) and a.dtype.kind == "f"     # a waypoint needs no token
+            continue
         assert a.shape == (1,) and 0 <= int(a[0]) < obs.tokens.shape[1]
 
 

@@ -98,13 +98,18 @@ Two later baselines, measured on the same configuration but over **10** episodes
 | lawnmower | 0.34 ± 0.14 | 0.22 | 569 | **0.39** | 2.00 · 0.70 · 0.70 · 0.70 |
 | oracle_assign (knows casualties) | 0.93 ± 0.10 | 0.77 | **98** | 0.50 | 2.40 · 1.90 · 2.30 · 4.50 |
 
-`lawnmower` is the coverage baseline: disjoint horizontal bands, a serpentine sweep inside each, and a divert onto any
-live ray whose feature argmaxes to `human_standing`/`human_prone` (9% of its robot-decisions on synthetic seeds 0-5).
-It re-covers the least ground of any baseline (redundancy fraction 0.39 against `nearest_frontier` 0.46 and
-`ray_follower` 0.72) and it finds **every** open casualty, but finding needs `found_hits` looks at one cell, so a
-steady sweep dwells less than a policy that ping-pongs and it trails on the container casualties. Only an
+`lawnmower` is the coverage baseline, and the one policy that acts in **waypoints** rather than tokens
+(float `[n_robots, 2]`, CONTRACTS.md 6): a stripe pattern flies over ground that is already mapped, where no token is
+ever offered, so steering by tokens zig-zags between frontiers instead of mowing. The region is cut into disjoint vertical strips,
+one per robot (`LawnmowerPolicy.strips`), each robot mows serpentine lanes one sensor swath apart inside its own strip
+and never leaves it, and it diverts onto any live ray *in its strip* whose feature argmaxes to
+`human_standing`/`human_prone`. On the 8-robot v2 protocol (24 held-out episodes, t_max auto ≤ 3000 s) it reads
+**0.21 ± 0.02 found / 0.12 AUC / 0.78 coverage, reward +10.0** with a redundancy metric of 0 (disjoint strips) and a
+re-covered fraction of 0.15, against 0.19 ± 0.02 / 0.10 / 0.68 / +5.1 / 0.38 for the token-steered sweep it replaces
+(`runs/lawnmower_waypoint_8robot.csv`). It finds **every** open casualty, but finding needs `found_hits` looks at one
+cell, so a steady sweep dwells less than a policy that ping-pongs and it trails on the container casualties. Only an
 `open`-visibility human raises a far-field human ray at all, so a casualty in a car, a building or under rubble is a
-container ray it sweeps past — the gap a learned policy has to close.
+container ray it sweeps past — the gap a learned policy has to close. (The 10-episode row above predates the rewrite.)
 
 `oracle_assign` is `oracle` with the greedy nearest-casualty claim replaced by the optimal matching
 (`scipy.optimize.linear_sum_assignment`, re-solved every decision). It reaches half the casualties in 98 s against the

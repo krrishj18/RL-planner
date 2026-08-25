@@ -31,6 +31,7 @@ class VecObs:
     local: np.ndarray | None = None         # float32 [E, R, Cl, S, S] ego-centric crops
     peer_tokens: np.ndarray | None = None   # float32 [E, R, R - 1, PEER_FEAT_DIM]
     robot_bev: np.ndarray | None = None     # float32 [E, R, C, Hr, Wr] per-robot BEV (actor)
+    region: np.ndarray | None = None        # float32 [E, 4] (x0, y0, x1, y1) per env
 
     @property
     def n_envs(self) -> int:
@@ -46,7 +47,8 @@ class VecObs:
                        local=None if self.local is None else self.local[e, :n],
                        peer_tokens=None if self.peer_tokens is None
                        else self.peer_tokens[e, :n, : max(n - 1, 0)],
-                       robot_bev=None if self.robot_bev is None else self.robot_bev[e, :n])
+                       robot_bev=None if self.robot_bev is None else self.robot_bev[e, :n],
+                       region=None if self.region is None else self.region[e])
 
 
 class VecEnv:
@@ -120,7 +122,8 @@ class VecEnv:
                    else np.zeros((E, R) + tuple(self.local_shape), np.float32)),
             peer_tokens=np.zeros((E, R, max(R - 1, 0), PEER_FEAT_DIM), np.float32),
             robot_bev=(None if self.rbev_shape is None
-                       else np.zeros((E, R) + tuple(self.rbev_shape), np.float32)))
+                       else np.zeros((E, R) + tuple(self.rbev_shape), np.float32)),
+            region=np.zeros((E, 4), np.float32))
         for i, o in enumerate(self._last):
             n, k = o.tokens.shape[0], o.tokens.shape[1]
             v.tokens[i, :n, :k] = o.tokens
@@ -141,6 +144,8 @@ class VecEnv:
                 v.peer_tokens[i, :n, : o.peer_tokens.shape[1]] = o.peer_tokens
             if v.robot_bev is not None and o.robot_bev is not None:
                 v.robot_bev[i, :n] = o.robot_bev
+            if o.region is not None:
+                v.region[i] = o.region
         return v
 
 

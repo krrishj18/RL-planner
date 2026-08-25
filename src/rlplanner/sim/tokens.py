@@ -342,7 +342,8 @@ class TokenBuilder:
                        query_emb=qe, query_w=qw, query_mask=qm,
                        t=float(t), local=self._local(views, robots, ri_i, ri_j),
                        peer_tokens=self._peer_tokens(views, robots, t, self._team_cover(rf)),
-                       robot_bev=self._robot_bev(views, robots))
+                       robot_bev=self._robot_bev(views, robots),
+                       region=np.array([x0, y0, x1, y1], np.float32))
 
     # -- pieces -----------------------------------------------------------------------------
     def _pack(self, v: RobotView, t: float, planner) -> dict:

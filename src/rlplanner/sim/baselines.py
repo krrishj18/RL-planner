@@ -1,4 +1,6 @@
-"""Hand-coded baselines (CONTRACTS.md 7). Each returns one token index per robot.
+"""Hand-coded baselines (CONTRACTS.md 7). Each returns one token index per robot — except
+`lawnmower`, which returns waypoints (float [n_robots, 2]); a stripe pattern flies over ground
+that is already mapped, and no token is ever offered there.
 
 They are heuristics *over the observation*, not rules inside the environment: the similarity a
 `ray_follower` ranks by is computed here, from the token's own `feat` and the query tokens the
@@ -13,14 +15,23 @@ from __future__ import annotations
 import numpy as np
 
 from ..scene import schema
-from .config import DEFAULT_QUERIES
+from .config import DEFAULT_QUERIES, EnvConfig
 from .embeddings import get_embedding_table
 from .sensor import human_visibility
-from .state import (F_DIST, F_FEAT0, F_XABS, F_YABS, TOKEN_FRONTIER, TOKEN_HOLD, TOKEN_RAY,
-                    TOKEN_SEGMENT, EnvState, TeamObs)
+from .state import (F_DIST, F_FEAT0, TOKEN_FRONTIER, TOKEN_HOLD, TOKEN_RAY, TOKEN_SEGMENT,
+                    EnvState, TeamObs)
 
 CLAIM_M = 15.0     # two robots flying to points this close are going to the same place
 HUMAN_CLASSES = (schema.CLASS_ID["human_standing"], schema.CLASS_ID["human_prone"])
+
+# `LawnmowerPolicy` lane geometry, when neither a constructor kwarg nor an `EnvState` supplies it
+_DEFAULTS = EnvConfig()
+DEPTH_LIMIT_M = float(_DEFAULTS.sensor.depth_limit_m)
+FLIGHT_ALT_M = float(_DEFAULTS.robot.flight_alt_m)
+ARRIVE_M = float(_DEFAULTS.robot.arrive_radius_m)
+HFOV_DEG = float(_DEFAULTS.sensor.hfov_deg)
+_MOVE_EPS_M = 0.25          # below this a robot did not move this decision
+_STALL_DECISIONS = 2        # that many motionless sweep decisions = an unreachable waypoint
 
 
 class _Claims:
@@ -221,28 +232,46 @@ class SegmentSeekerPolicy(Policy):
 
 
 class LawnmowerPolicy(Policy):
-    """Boustrophedon coverage that breaks off to investigate a human it actually sees.
+    """Textbook boustrophedon coverage that breaks off to investigate a human it actually sees.
 
-    **Sweep.** The region is cut into `n_robots` contiguous horizontal bands, robot `r` owning band
-    `r` (bands are disjoint, so the team de-conflicts by construction and the position claims only
-    bite on the out-of-band fallback). Inside its band the robot follows a fixed serpentine order:
-    lanes one sensor swath tall, +x along an even lane and -x along an odd one. The action is a
-    token, so "go to the next sweep waypoint" is *the in-band frontier with the smallest sweep key*
-    — frontiers vanish as the ground behind them is mapped, so the smallest remaining key is always
-    the next unswept point of the band and an interrupted sweep resumes where it stopped instead of
-    restarting. A frontier the robot has effectively already reached sorts last (the `min_travel`
-    guard of CONTRACTS.md 12, folded into the key rather than filtering); an empty band falls back
-    to the nearest frontier anywhere, and only a robot with no frontier at all holds.
+    **Waypoint actions.** `act` returns float `[n_robots, 2]` world points, not token indices
+    (CONTRACTS.md 6): a stripe pattern flies *over ground it has already mapped*, and a token is
+    only ever offered at the edge of the unknown, so the token action space cannot express a
+    lawnmower at all — steering by tokens zig-zags between frontiers. A row of NaNs is "hold".
+
+    **Sweep.** The region — `TeamObs.region`, the deployment extent, not something guessed from the
+    tokens the robot happens to hold — is cut into `n_robots` contiguous **vertical strips** of
+    equal width (`strips`), robot `r` owning strip `r` for the whole episode. Its strip is filled
+    with `ceil(strip_width / swath)` evenly spaced vertical lanes, the swath being the ground width
+    one pass of the camera sweeps (`_swath`: the depth limit's horizontal reach, narrowed by the
+    horizontal FoV), and the waypoint list is the lane ends in serpentine order: +y along an even
+    lane, -y along an odd one, the ends inset half a swath so the footprint still reaches the
+    boundary. A per-robot cursor walks that list, advancing when the robot is within
+    `arrive_radius_m` of the point it is flying to; a point A* cannot reach (a lane end inside a
+    building) leaves the robot parked, so `_STALL_DECISIONS` decisions without motion advance the
+    cursor past it.
+
+    **A robot never leaves its strip.** Every waypoint it emits — sweep or divert — is clamped into
+    its own x range, and there is no fallback onto a neighbour's ground: strips are disjoint, so
+    nothing has to de-conflict the sweep, each robot's cursor is its own, and the whole thing is
+    unchanged under range comms and for any `n_robots` in 1..10. A robot with no strip to sweep (a
+    degenerate region, or no region on offer) holds — a NaN row. One that reaches the end of its
+    list wraps to lane 0, the lane it swept longest ago, and runs its own serpentine again — all a
+    robot with a per-robot view can do, since it cannot see which of its lanes the stochastic hit
+    model left unobserved.
 
     **Investigate.** A sweep that ignores what it sees is not a search baseline, so a live ray whose
-    feature *is* a person diverts the robot. The classification is threshold-free: argmax cosine of
-    the ray token's own `feat` over the **whole class-embedding set**, a human ray iff the argmax
-    lands on `human_standing`/`human_prone`. No score is compared against a cutoff and no mission
-    query is read — the queries would make the divert a function of the word list. The nearest such
-    ray wins, and the robot stays on it until the ray resolves (it leaves the token set) or it has
-    arrived (the target falls inside the `min_travel` guard), then the sweep resumes at its next
-    waypoint. This runs on the robot's own view, so it works unchanged under range comms; a ray a
-    peer gossiped is investigated like the robot's own.
+    feature *is* a person diverts the robot: the waypoint becomes that ray's own target point. The
+    classification is threshold-free — argmax cosine of the ray token's `feat` over the **whole
+    class-embedding set**, a human ray iff the argmax lands on `human_standing`/`human_prone`. No
+    score is compared against a cutoff and no mission query is read, which would make the divert a
+    function of the word list. Only a ray whose target lands **inside the robot's own strip**
+    counts: one pointing across the boundary is a teammate's to investigate, and chasing it would
+    both break the partition and put two robots on one body. The nearest such ray wins, and the
+    robot stays on it until the ray resolves (it leaves the token set) or it has arrived (the
+    target falls inside the `min_travel` guard); the cursor is untouched while it is away, so the
+    sweep resumes at the waypoint it left. This runs on the robot's own view, so a ray a peer
+    gossiped is investigated like its own.
 
     Only rays trigger a divert. Only an `open`-visibility human raises a far-field human ray at all
     (CONTRACTS.md 4): a casualty in a car, a building or under rubble is a `vehicle_toppled` /
@@ -253,28 +282,191 @@ class LawnmowerPolicy(Policy):
     close-range human voxels accrue their find hits from the sweep's own footprint anyway.
     """
     name = "lawnmower"
+    waypoint_policy = True                  # `act` -> float [n_robots, 2] waypoints
 
-    def __init__(self, queries=DEFAULT_QUERIES, seed: int = 0, min_travel_m: float | None = None):
+    def __init__(self, queries=DEFAULT_QUERIES, seed: int = 0, min_travel_m: float | None = None,
+                 depth_limit_m: float | None = None, flight_alt_m: float | None = None,
+                 hfov_deg: float | None = None, arrive_radius_m: float | None = None,
+                 swath_m: float | None = None):
         super().__init__(queries, seed)
         self.min_travel_m = min_travel_m
+        # None = take it from the env when there is one, else the EnvConfig default
+        self.depth_limit_m = depth_limit_m
+        self.flight_alt_m = flight_alt_m
+        self.hfov_deg = hfov_deg
+        self.arrive_radius_m = arrive_radius_m
+        self.swath_m = swath_m                  # pins the lane spacing outright
         self._chasing: dict[int, int] = {}      # robot -> ray token id it is investigating
         self._class_emb: dict[int, np.ndarray] = {}
+        self._cursor: dict[int, int] = {}       # robot -> index into its own waypoint list
+        self._prev_xy: dict[int, tuple[float, float]] = {}
+        self._stalled: dict[int, int] = {}      # consecutive sweep decisions without motion
+        self._lanes: tuple[tuple, dict[int, np.ndarray]] | None = None
 
     def reset(self, seed: int | None = None) -> None:
         super().reset(seed)
         self._chasing.clear()
+        self._cursor.clear()
+        self._prev_xy.clear()
+        self._stalled.clear()
+        self._lanes = None
 
-    def act(self, obs, state=None):
+    def act(self, obs, state=None) -> np.ndarray:
         n = obs.n_robots
-        out = np.zeros(n, np.int64)
+        out = np.full((n, 2), np.nan, np.float64)
         taken = _Claims()
         lo = self._min_travel(state)
-        lane_h = self._lane_height(state)
         cls = self._classes(obs, state)
+        reg = self._region(obs, state)
+        swath = self._swath(state)
+        arrive = self._arrive(state)
+        pos = self._positions(obs, state, reg)
+        strips = self.strips(reg, n)
         for r in range(n):
-            pick = self._investigate(obs, state, r, taken, lo, cls)
-            out[r] = self._sweep(obs, state, r, n, taken, lo, lane_h) if pick < 0 else pick
+            sx = strips[r] if strips is not None else None
+            xy = self._investigate(obs, state, r, taken, lo, cls, sx)
+            if xy is None:
+                xy = self._sweep(r, n, reg, swath, arrive, pos)
+            if xy is not None:
+                out[r] = self._clamp(xy, sx)
         return out
+
+    @staticmethod
+    def strips(region, n_robots: int) -> list[tuple[float, float]] | None:
+        """The x range each robot owns, low to high — `[(x0, x1)] * n_robots`, or None with no
+        region. Public so a viewer can draw the partition without re-deriving it."""
+        reg = LawnmowerPolicy._region_tuple(region)
+        if reg is None:
+            return None
+        x0, _, x1, _ = reg
+        n = max(int(n_robots), 1)
+        w = (x1 - x0) / n
+        return [(x0 + w * i, x0 + w * (i + 1)) for i in range(n)]
+
+    @staticmethod
+    def _clamp(xy, strip) -> np.ndarray:
+        """A waypoint never leaves the robot's own strip, however it was chosen."""
+        out = np.asarray(xy, np.float64).copy()
+        if strip is not None:
+            out[0] = min(max(out[0], strip[0]), strip[1])
+        return out
+
+    # -- geometry --------------------------------------------------------------------------
+    def _cfg_val(self, state, pinned, path: tuple[str, str], default: float) -> float:
+        """A constructor kwarg wins; otherwise the env's own value, otherwise the shipped one."""
+        if pinned is not None:
+            return float(pinned)
+        cfg = getattr(state, "cfg", None) if state is not None else None
+        if cfg is not None:
+            return float(getattr(getattr(cfg, path[0]), path[1]))
+        return float(default)
+
+    def _swath(self, state) -> float:
+        """Ground width one pass of the camera sweeps.
+
+        `reach = sqrt(depth_limit^2 - flight_alt^2)` is how far in front of the robot the depth
+        limit reaches along the ground, so the footprint spans `2 * reach` *across* the flight line
+        only if the camera looks sideways as far as it looks forward. It does not: the wedge is
+        `hfov_deg` wide, so the widest point of the swept sector sits at `reach * sin(hfov / 2)`
+        off the line and lanes a full `2 * reach` apart leave a strip between them unobserved
+        (measured on an empty 240 m scene, 3 robots, ample horizon: 0.89 coverage at `2 * reach`
+        against 1.00 at `2 * reach * sin(hfov / 2)`). `swath_m` pins it if a caller wants the
+        uncorrected width back.
+        """
+        if self.swath_m is not None:
+            return max(float(self.swath_m), 1e-6)
+        d = self._cfg_val(state, self.depth_limit_m, ("sensor", "depth_limit_m"), DEPTH_LIMIT_M)
+        a = self._cfg_val(state, self.flight_alt_m, ("robot", "flight_alt_m"), FLIGHT_ALT_M)
+        h = self._cfg_val(state, self.hfov_deg, ("sensor", "hfov_deg"), HFOV_DEG)
+        reach = float(np.sqrt(max(d * d - a * a, 1.0)))
+        wide = 1.0 if h >= 180.0 else float(np.sin(0.5 * np.radians(max(h, 1e-6))))
+        return max(2.0 * reach * wide, 1e-6)
+
+    def _arrive(self, state) -> float:
+        return self._cfg_val(state, self.arrive_radius_m, ("robot", "arrive_radius_m"), ARRIVE_M)
+
+    @staticmethod
+    def _region_tuple(reg) -> tuple[float, float, float, float] | None:
+        if reg is None:
+            return None
+        v = np.asarray(reg, np.float64).reshape(-1)
+        if v.size < 4 or not np.isfinite(v[:4]).all() or v[2] <= v[0] or v[3] <= v[1]:
+            return None
+        return float(v[0]), float(v[1]), float(v[2]), float(v[3])
+
+    @staticmethod
+    def _region(obs, state) -> tuple[float, float, float, float] | None:
+        """(x0, y0, x1, y1) from the observation's own metadata, else the env's raster."""
+        reg = getattr(obs, "region", None)
+        if reg is None and state is not None:
+            reg = getattr(getattr(state, "raster", None), "region", None)
+        return LawnmowerPolicy._region_tuple(reg)
+
+    @staticmethod
+    def _positions(obs, state, reg) -> np.ndarray | None:
+        """World xy per robot: the env's when there is one, else `robot_feat`'s [-1, 1] pose
+        un-scaled by the region — the sweep runs off the observation alone under range comms."""
+        if state is not None and getattr(state, "robots", None):
+            return np.array([[rb.pos[0], rb.pos[1]] for rb in state.robots], np.float64)
+        rf = getattr(obs, "robot_feat", None)
+        if reg is None or rf is None or np.asarray(rf).shape[1] < 2:
+            return None
+        x0, y0, x1, y1 = reg
+        f = np.asarray(rf, np.float64)[:, :2]
+        return np.stack([x0 + 0.5 * (f[:, 0] + 1.0) * (x1 - x0),
+                         y0 + 0.5 * (f[:, 1] + 1.0) * (y1 - y0)], axis=1)
+
+    def _strip_lanes(self, reg, n_robots: int, r: int, swath: float) -> np.ndarray:
+        """[m, 2] serpentine waypoints of robot `r`'s strip; empty when it has no strip to fly."""
+        key = (reg, int(n_robots), float(swath))
+        if self._lanes is None or self._lanes[0] != key:
+            self._lanes = (key, {})
+        hit = self._lanes[1].get(r)
+        if hit is not None:
+            return hit
+        x0, y0, x1, y1 = reg
+        n = max(int(n_robots), 1)
+        w_strip = (x1 - x0) / n
+        w = max(float(swath), 1e-6)
+        if w_strip <= 0.0 or y1 <= y0:
+            out = np.zeros((0, 2), np.float64)
+        else:
+            n_lane = max(1, int(np.ceil(w_strip / w - 1e-9)))
+            dx = w_strip / n_lane
+            inset = min(0.5 * w, 0.5 * (y1 - y0) - 1e-6)
+            ya, yb = y0 + inset, y1 - inset
+            pts = []
+            for i in range(n_lane):
+                x = x0 + w_strip * r + (i + 0.5) * dx
+                pts += [(x, ya), (x, yb)] if i % 2 == 0 else [(x, yb), (x, ya)]
+            out = np.asarray(pts, np.float64)
+        self._lanes[1][r] = out
+        return out
+
+    def _sweep(self, r: int, n_robots: int, reg, swath: float, arrive: float,
+               pos) -> np.ndarray | None:
+        """The next unreached waypoint of robot `r`'s strip, or None to hold."""
+        if reg is None or pos is None or r >= pos.shape[0]:
+            return None
+        way = self._strip_lanes(reg, n_robots, r, swath)
+        m = way.shape[0]
+        if m == 0:
+            return None
+        p = pos[r]
+        c = int(self._cursor.get(r, 0)) % m
+        for _ in range(m):                      # skip the points the robot is already standing on
+            if float(np.hypot(way[c, 0] - p[0], way[c, 1] - p[1])) > arrive:
+                break
+            c = (c + 1) % m
+        prev = self._prev_xy.get(r)
+        moved = prev is None or np.hypot(p[0] - prev[0], p[1] - prev[1]) > _MOVE_EPS_M
+        self._stalled[r] = 0 if moved else int(self._stalled.get(r, 0)) + 1
+        if self._stalled[r] >= _STALL_DECISIONS:
+            c = (c + 1) % m                     # A* cannot reach it (a lane end inside a building)
+            self._stalled[r] = 0
+        self._prev_xy[r] = (float(p[0]), float(p[1]))
+        self._cursor[r] = c
+        return way[c].copy()
 
     # -- investigate -----------------------------------------------------------------------
     def _classes(self, obs, state) -> np.ndarray:
@@ -305,16 +497,20 @@ class LawnmowerPolicy(Policy):
         return hit & (n[:, 0] > 0)             # zero or non-finite: no argmax to trust
 
     def _investigate(self, obs, state, r: int, taken: "_Claims", lo: float,
-                     cls: np.ndarray) -> int:
-        """The ray token to fly at, or -1 to sweep. Sticky: the current one until it goes away."""
+                     cls: np.ndarray, strip) -> np.ndarray | None:
+        """The point to fly at, or None to sweep. Sticky: the current ray until it goes away.
+
+        A ray whose target lands outside `strip` is a teammate's business and never diverts."""
         hit = self._human_rays(obs, r, cls)
         live = {int(obs.token_id[r, k]): int(k) for k in np.flatnonzero(hit)
-                if self._dist(state, r, int(k), obs) >= lo}
+                if self._dist(state, r, int(k), obs) >= lo
+                and np.isfinite(obs.token_xy[r, int(k)]).all()
+                and self._in_strip(obs.token_xy[r, int(k)], strip)}
         held = self._chasing.get(r)
         if held is not None and held in live \
                 and not taken.has((TOKEN_RAY, held), obs.token_xy[r, live[held]]):
             taken.add((TOKEN_RAY, held), obs.token_xy[r, live[held]])
-            return live[held]
+            return np.asarray(obs.token_xy[r, live[held]], np.float64)
         # resolved, arrived, or a lower-index robot got there first: back to the sweep
         self._chasing.pop(r, None)
         best, best_d = -1, np.inf
@@ -325,47 +521,14 @@ class LawnmowerPolicy(Policy):
             if d < best_d:
                 best, best_d = k, d
         if best < 0:
-            return -1
+            return None
         self._chasing[r] = int(obs.token_id[r, best])
         taken.add((TOKEN_RAY, self._chasing[r]), obs.token_xy[r, best])
-        return best
+        return np.asarray(obs.token_xy[r, best], np.float64)
 
-    # -- sweep -----------------------------------------------------------------------------
     @staticmethod
-    def _lane_height(state) -> float:
-        """One sensor swath, in the [-1, 1] region coordinates the tokens carry."""
-        if state is None:
-            return 2.0                          # no region to scale by: one lane per band
-        c = state.cfg
-        swath = 2.0 * float(np.sqrt(max(c.sensor.depth_limit_m ** 2
-                                        - c.robot.flight_alt_m ** 2, 1.0)))
-        y0, y1 = state.raster.region[1], state.raster.region[3]
-        return float(max(2.0 * swath / max(y1 - y0, 1e-9), 1e-6))
-
-    def _sweep(self, obs, state, r: int, n_robots: int, taken: "_Claims", lo: float,
-               lane_h: float) -> int:
-        band = 2.0 / max(int(n_robots), 1)
-        y_lo = -1.0 + band * int(r)
-        y_hi = 1.0 + 1e-6 if r == n_robots - 1 else y_lo + band
-        best, best_key = -1, None
-        for k in self._valid(obs, r):
-            k = int(k)
-            if int(obs.token_type[r, k]) != TOKEN_FRONTIER:
-                continue
-            yn = float(obs.tokens[r, k, F_YABS])
-            if not (y_lo <= yn < y_hi):
-                continue
-            if taken.has((TOKEN_FRONTIER, int(obs.token_id[r, k])), obs.token_xy[r, k]):
-                continue
-            xn = float(obs.tokens[r, k, F_XABS])
-            lane = int((yn - y_lo) / lane_h)
-            key = (self._dist(state, r, k, obs) < lo, lane, xn if lane % 2 == 0 else -xn)
-            if best_key is None or key < best_key:
-                best, best_key = k, key
-        if best >= 0:
-            taken.add((TOKEN_FRONTIER, int(obs.token_id[r, best])), obs.token_xy[r, best])
-            return best
-        return self._nearest_frontier(obs, state, r, taken, lo)
+    def _in_strip(xy, strip) -> bool:
+        return strip is None or (strip[0] <= float(xy[0]) <= strip[1])
 
 
 class OraclePolicy(Policy):

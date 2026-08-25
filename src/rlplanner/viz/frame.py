@@ -656,8 +656,9 @@ def draw_tokens(ax: Axes, state: S.EnvState, focus_robot: int) -> int:
         raise IndexError(f"focus_robot={r} outside last_obs token_mask "
                          f"[0, {obs.token_mask.shape[0]})")
     chosen = -1
-    if state.last_actions is not None and r < len(state.last_actions):
-        chosen = int(state.last_actions[r])
+    if (state.last_actions is not None and np.ndim(state.last_actions) == 1
+            and r < len(state.last_actions)):
+        chosen = int(state.last_actions[r])     # waypoint actions are [n, 2]: no token to ring
     n = 0
     for k in np.flatnonzero(obs.token_mask[r]):
         xy = np.asarray(obs.token_xy[r, k], dtype=float)
@@ -870,7 +871,7 @@ def robot_target_label(state: S.EnvState, r: S.RobotState) -> str:
     if r.target_xy is not None:
         return f"{name(r.target_token_type)}#{r.target_id}"
     obs, act = state.last_obs, state.last_actions
-    if obs is not None and act is not None and r.idx < len(act):
+    if obs is not None and act is not None and np.ndim(act) == 1 and r.idx < len(act):
         k = int(act[r.idx])
         if 0 <= k < obs.token_type.shape[1]:
             return f"{name(obs.token_type[r.idx, k])}#{int(obs.token_id[r.idx, k])}"

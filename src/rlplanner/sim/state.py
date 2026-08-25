@@ -90,6 +90,11 @@ class TeamObs:
     peer_tokens: np.ndarray | None = None  # float32 [n_robots, n_robots - 1, PEER_FEAT_DIM]
     robot_bev: np.ndarray | None = None    # float32 [n_robots, C, Hr, Wr] BEV of each robot's own
                                            # belief (actor side); None when robot_bev_size = 0
+    region: np.ndarray | None = None       # float32 [4] (x0, y0, x1, y1) world bounds of the map.
+                                           # Team-wide metadata, not a belief: the extent is known
+                                           # at deployment, so a waypoint policy reads it here
+                                           # instead of guessing it from the tokens it happens to
+                                           # hold. None on a hand-built observation.
 
     @property
     def n_robots(self) -> int:
@@ -114,6 +119,7 @@ class RobotState:
     trajectory: list[tuple[float, float]] = field(default_factory=list)  # xy per sub-step
     last_action: int = -1
     target_feat: np.ndarray | None = None  # float32 [D] feature of the token it is flying to
+    target_waypoint: bool = False          # goal came from a waypoint action, not a token
 
 
 @dataclass

@@ -10,7 +10,8 @@ from rlplanner.scene.schema import make_synthetic_scene
 from rlplanner.sim.baselines import make_policy
 from rlplanner.sim.config import EnvConfig
 from rlplanner.sim.env import DisasterEnv
-from rlplanner.sim.state import (CASUALTY_ROLE_ID, TOKEN_SEGMENT, Event, RobotState, VisitRecord)
+from rlplanner.sim.state import (CASUALTY_ROLE_ID, TOKEN_FRONTIER, TOKEN_SEGMENT, Event,
+                                 RobotState, VisitRecord)
 
 SCENE = dict(region_m=(200.0, 200.0), n_casualties=6, n_bystanders=3)
 
@@ -47,19 +48,33 @@ def _record(env, xy, robot, t=None, share_with=(), n_found=1):
     return rec
 
 
-def _arrive(env, robot: int, xy, ttype=TOKEN_SEGMENT):
+def _arrive(env, robot: int, xy, ttype=TOKEN_SEGMENT, waypoint=False):
     """Drive one arrival at a chosen target without waiting for the robot to fly there.
 
     The env only counts an arrival the robot *travelled* to, so the decision-start position is
-    pushed away from the target first.
+    pushed away from the target first. `waypoint` marks the goal as a direct waypoint action.
     """
     rb = env.state.robots[robot]
     env._dec_pos0[robot] = np.asarray(xy, np.float64) + np.array([50.0, 50.0])
     rb.target_xy = np.asarray(xy, np.float64)
-    rb.target_token_type = ttype
-    rb.target_id = 1
-    rb.target_feat = np.zeros(env.rf.D, np.float32)
+    rb.target_token_type = TOKEN_FRONTIER if waypoint else ttype
+    rb.target_waypoint = bool(waypoint)
+    rb.target_id = -1 if waypoint else 1
+    rb.target_feat = None if waypoint else np.zeros(env.rf.D, np.float32)
     env._on_arrive(rb, env.state.t)
+
+
+def test_a_waypoint_arrival_records_nothing_and_owes_nothing():
+    """A waypoint names no map item, so it writes no visited record and pays no revisit -- the
+    same arrival reached through a token target does both (CONTRACTS.md 6)."""
+    env = _env(_cfg())
+    here = env.state.robots[0].pos.copy()
+    _record(env, here, robot=1)
+    env._begin_decision()
+    _arrive(env, 0, here + np.array([2.0, 0.0]), waypoint=True)
+    assert env._revisits[0] == 0 and len(env.visits) == 1
+    _arrive(env, 0, here + np.array([2.0, 0.0]))
+    assert env._revisits[0] == 1 and len(env.visits) == 2
 
 
 # ---- revisit ------------------------------------------------------------------------------

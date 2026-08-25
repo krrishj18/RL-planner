@@ -80,7 +80,8 @@ class EpisodeRecorder:
             "n_casualties": int(st.n_casualties),
             "coverage": float(st.coverage),
             "reward": float(st.cum_reward),
-            "actions": None if actions is None else np.asarray(actions).astype(np.int32).tolist(),
+            "actions": (None if actions is None or np.ndim(actions) != 1
+                        else np.asarray(actions).astype(np.int32).tolist()),
         }
 
     def run(self, policy, max_decisions: int | None = None, seed: int | None = None,

@@ -541,3 +541,51 @@ def test_privileged_episodes_confirm_on_arrival_where_stochastic_never_could():
     assert blind[0]["frac_found"] == 0.0
     seen = _run_episodes(bank, cfg, "oracle", [(key, 0)], 2, max_decisions=40)
     assert seen[0]["frac_found"] > 0.0
+
+
+# ---- motion-only ideal bound -------------------------------------------------------------------
+def test_ideal_routes_single_robot_line():
+    from rlplanner.sim.ideal import ideal_routes
+    sp = np.array([[0.0, 0.0]])
+    tg = np.array([[100.0, 0.0], [200.0, 0.0]])
+    arr, tours = ideal_routes(sp, tg, speed=5.0)
+    assert np.allclose(sorted(arr), [20.0, 40.0])
+    assert tours[0] in ([0, 1],)
+
+
+def test_ideal_bound_counts_only_within_horizon():
+    from rlplanner.sim.ideal import ideal_routes
+    sp = np.array([[0.0, 0.0]])
+    tg = np.array([[100.0, 0.0], [200.0, 0.0]])
+    arr, _ = ideal_routes(sp, tg, speed=5.0)
+    assert (arr <= 25.0).sum() == 1
+
+
+def test_ideal_two_robots_split_clusters():
+    from rlplanner.sim.ideal import ideal_routes
+    sp = np.array([[0.0, 0.0], [1000.0, 0.0]])
+    tg = np.array([[10.0, 0.0], [20.0, 0.0], [990.0, 0.0], [980.0, 0.0]])
+    arr, tours = ideal_routes(sp, tg, speed=5.0)
+    assert sorted(tours[0]) == [0, 1] and sorted(tours[1]) == [2, 3]
+
+
+def test_ideal_bound_on_real_env():
+    from rlplanner.scene.schema import make_synthetic_scene
+    from rlplanner.sim.config import EnvConfig
+    from rlplanner.sim.env import DisasterEnv
+    from rlplanner.sim.ideal import ideal_bound
+    cfg = EnvConfig(); cfg.robot.n_robots = 3; cfg.t_max_s = 300.0
+    env = DisasterEnv(make_synthetic_scene(0, region_m=(200.0, 200.0), n_casualties=6,
+                                           n_bystanders=2), cfg, seed=0)
+    row = ideal_bound(env)
+    assert 0.0 < row["frac_found"] <= 1.0 and 0.0 < row["finds_auc"] <= 1.0
+    assert row["time_to_first"] <= row["time_to_half"] <= row["time_to_all"]
+
+
+def test_ideal_via_evaluate_policy():
+    from rlplanner.sim.config import EnvConfig
+    from rlplanner.train.evaluate import evaluate_policy
+    from rlplanner.train.scenes import SceneBank
+    bank = SceneBank("synthetic:0-3", region_m=(200.0, 200.0))
+    res = evaluate_policy("oracle_ideal", bank, EnvConfig(), episodes=2, robots=3, split="train")
+    assert res["frac_found"].shape == (2,) and np.all(res["frac_found"] > 0)

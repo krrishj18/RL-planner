@@ -18,6 +18,7 @@ import torch
 
 from ..sim import baselines
 from ..sim.config import EnvConfig, instant_confirm
+from ..sim.ideal import IDEAL_NAME, ideal_bound
 from ..sim.state import TeamObs
 from .obs import ObsBatch
 from .par_env import default_workers, make_vec_env, run_episode
@@ -147,6 +148,19 @@ def evaluate_policy(actor, bank: SceneBank, cfg: EnvConfig, episodes: int = 8,
     episode; `t_max=None` keeps `cfg.t_max_s`. `pool` reuses an existing vec env's workers.
     """
     tasks = eval_tasks(bank, split, episodes, seed)
+    if isinstance(actor, str) and actor == IDEAL_NAME:      # motion-only bound: no env episodes
+        rows = []
+        for k, s_ in tasks:
+            nr, tm = bank.env_params(k, robots, cfg.t_max_s if t_max is None else t_max)
+            ecfg = copy.deepcopy(cfg)
+            ecfg.robot.n_robots = int(nr)
+            ecfg.t_max_s = float(tm)
+            row = ideal_bound(bank.make_env(k, ecfg, s_))
+            row.update({"scene": str(k), "area_km2": bank.area(k), "bucket": bank.bucket(k),
+                        "disaster": bank.disaster(k), "n_robots": int(nr), "t_max": float(tm)})
+            rows.append(row)
+        res = {c: np.array([r.get(c, np.nan) for r in rows], np.float64) for c in EVAL_COLS}
+        return (res, rows) if return_rows else res
     name = _baseline_name(actor)
     own = None
     if pool is None:

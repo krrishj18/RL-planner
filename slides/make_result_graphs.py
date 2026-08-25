@@ -19,6 +19,10 @@ import os
 if os.path.exists("runs/oracle_instant_8robot.csv"):      # corrected privileged rows
     for r in rows("runs/oracle_instant_8robot.csv"):
         bl[r["policy"]] = r
+if os.path.exists("runs/lawnmower_waypoint_8robot.csv"):  # true waypoint lawnmower row
+    for r in rows("runs/lawnmower_waypoint_8robot.csv"):
+        if r["policy"] == "lawnmower":
+            bl["lawnmower"] = r
 fin = rows(f"{SRC}/ft/latest_eval.csv")[0]
 log = rows(f"{SRC}/ft/log.csv")
 

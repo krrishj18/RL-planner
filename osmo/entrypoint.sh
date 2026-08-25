@@ -71,7 +71,7 @@ case "${RLP_SCENES:-synthetic}" in
   *v1*) log "exporting v1 scenes"; uv run python scripts/export_scenes.py --preset earthquake tornado explosion --seeds 0:80 --region 400 400 --size-jitter 0.25 --casualties auto --bystanders auto --out data/scenes 2>&1 | tail -1 ;;
 esac
 case "${RLP_SCENES:-synthetic}" in
-  *v2*) log "exporting v2 scenes"; uv run python scripts/export_scenes.py --pipeline v2 --locale downtown --disaster earthquake tornado explosion --severity-range 0.5 1.0 --seeds 0:60 --region-range 500 1500 --size-jitter 0.25 --casualties auto --bystanders auto --out data/scenes_v2 2>&1 | tail -1 ;;
+  *v2*) log "exporting v2 scenes"; uv run python scripts/export_scenes.py --pipeline v2 --locale downtown --disaster earthquake tornado explosion --severity-range ${RLP_V2_SEV:-0.5 1.0} --seeds "${RLP_V2_SEEDS:-0:60}" --region-range 500 1500 --size-jitter 0.25 --casualties auto --bystanders auto --out data/scenes_v2 2>&1 | tail -1 ;;
 esac
 
 # ---- job ----------------------------------------------------------------------------------

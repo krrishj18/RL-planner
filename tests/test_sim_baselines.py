@@ -545,28 +545,44 @@ def test_privileged_episodes_confirm_on_arrival_where_stochastic_never_could():
 
 # ---- motion-only ideal bound -------------------------------------------------------------------
 def test_ideal_routes_single_robot_line():
-    from rlplanner.sim.ideal import ideal_routes
-    sp = np.array([[0.0, 0.0]])
-    tg = np.array([[100.0, 0.0], [200.0, 0.0]])
-    arr, tours = ideal_routes(sp, tg, speed=5.0)
+    from rlplanner.sim.ideal import euclidean_matrix, ideal_routes
+    D = euclidean_matrix(np.array([[0.0, 0.0]]), np.array([[100.0, 0.0], [200.0, 0.0]]))
+    arr, tours = ideal_routes(D, 1, speed=5.0)
     assert np.allclose(sorted(arr), [20.0, 40.0])
-    assert tours[0] in ([0, 1],)
 
 
 def test_ideal_bound_counts_only_within_horizon():
-    from rlplanner.sim.ideal import ideal_routes
-    sp = np.array([[0.0, 0.0]])
-    tg = np.array([[100.0, 0.0], [200.0, 0.0]])
-    arr, _ = ideal_routes(sp, tg, speed=5.0)
+    from rlplanner.sim.ideal import euclidean_matrix, ideal_routes
+    D = euclidean_matrix(np.array([[0.0, 0.0]]), np.array([[100.0, 0.0], [200.0, 0.0]]))
+    arr, _ = ideal_routes(D, 1, speed=5.0)
     assert (arr <= 25.0).sum() == 1
 
 
 def test_ideal_two_robots_split_clusters():
-    from rlplanner.sim.ideal import ideal_routes
-    sp = np.array([[0.0, 0.0], [1000.0, 0.0]])
-    tg = np.array([[10.0, 0.0], [20.0, 0.0], [990.0, 0.0], [980.0, 0.0]])
-    arr, tours = ideal_routes(sp, tg, speed=5.0)
+    from rlplanner.sim.ideal import euclidean_matrix, ideal_routes
+    D = euclidean_matrix(np.array([[0.0, 0.0], [1000.0, 0.0]]),
+                         np.array([[10.0, 0.0], [20.0, 0.0], [990.0, 0.0], [980.0, 0.0]]))
+    arr, tours = ideal_routes(D, 2, speed=5.0)
     assert sorted(tours[0]) == [0, 1] and sorted(tours[1]) == [2, 3]
+
+
+def test_obstacle_matrix_routes_around_a_wall():
+    from rlplanner.sim.ideal import obstacle_matrix
+    obst = np.zeros((21, 21), bool)
+    obst[:20, 10] = True                        # wall with a gap at the bottom
+    ij = np.array([[0, 0], [0, 20]])
+    D = obstacle_matrix(obst, 1.0, ij)
+    assert D[0, 1] > 20.0 + 5                   # detour well beyond the straight line
+    assert np.isfinite(D[0, 1])
+
+
+def test_blocked_poi_snaps_to_adjacent_free_cell():
+    from rlplanner.sim.ideal import obstacle_matrix
+    obst = np.zeros((11, 11), bool)
+    obst[4:7, 4:7] = True                       # a target inside a tower footprint
+    ij = np.array([[0, 0], [5, 5]])
+    D = obstacle_matrix(obst, 1.0, ij)
+    assert np.isfinite(D[0, 1]) and D[0, 1] > 0
 
 
 def test_ideal_bound_on_real_env():

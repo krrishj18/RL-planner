@@ -237,3 +237,25 @@ before — found overlaps the 12-episode CI but the whole trajectory is stronger
 matched by update 100). The greedy oracle's reward moves −256 → +0.9: its returns to unconfirmed
 targets are search, not waste, and are no longer charged. Final 24-episode greedy/sampled CSVs:
 `/volume4/dsta/rl-planner/ws_v2_central2/runs/ws_central_full/{bc,ft}/`.
+
+## H5 — 8-robot v2 run, motion-only ideal, and the LLM hint ablation (2026-08-25)
+
+`ws_v2_8robot`: 8 robots fixed, t_max auto ≤ 3000 s, dynamic queries ON, confirmed-only revisit.
+Held-out v2, 24-episode finals (greedy): **learned 0.203 ± 0.017 found / 0.127 AUC, coverage 0.79,
+reward +7.0** vs nearest 0.17, lawnmower 0.16 (lowest redundancy 0.39; finds every open casualty,
+trails on containers), ray_follower 0.16, random 0.03. In-train peak 0.22 at update 150.
+
+**`oracle_ideal`** (motion-only bound; obstacle-aware Dijkstra over the env's blocked mask,
+arrival = visit): **1.00 found / 0.88 AUC, all casualties in ~11.1 km of the ~62 km budget** — the
+horizon never binds; the whole gap below the ideal is search + confirmation. Progress = found/ideal
+= found fraction on this bank. Token-space instant-confirm oracles (0.25–0.27) are bounded by the
+token action interface, not time, and were dropped from headline charts in favour of the ideal.
+
+**LLM hint-lift ablation** (6 heldout episodes/condition, live Claude backend, cadence 10):
+none 0.20 · static 0.19 · scripted 0.20 · llm 0.19 — **no lift; the policy ignores the query
+channel**. Expected on a closed 15-class sim: container correlations are fully learnable from raw
+token features, so queries add no information (COS-POMDP: priors pay when semantics are open or
+unreliable). The channel itself works end-to-end (189 list-changing LLM edits landed via
+set_queries). To make hints bite: per-disaster casualty-container priors that vary across episodes
+(the query channel becomes the only way to know which prior applies) and/or eval-time novel
+container classes. CSVs: runs/llm_hints_8robot/, runs/oracle_ideal_8robot.csv.

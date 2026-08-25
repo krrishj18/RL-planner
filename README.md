@@ -49,7 +49,12 @@ city scale**: 0.19 ± 0.03 found / 0.11 AUC vs nearest-frontier 0.15 ± 0.03 / 0
 it beats the greedy *privileged* oracle (0.14, reward −256), which collapses by beelining at this scale.
 With the revisit penalty scoped to confirmed targets (`ws_v2_central2`, DESIGN_VARIANTS §H4) the same
 recipe reaches **0.21 ± 0.03 / 0.12, reward +8.3** — and the greedy oracle's reward flips −256 → +0.9,
-confirming the penalty now charges only true waste. PPO-from-scratch plateaus at the heuristic level
+confirming the penalty now charges only true waste.
+At 8 robots / horizon ≤ 3000 s (`ws_v2_8robot`, dynamic queries on): **0.203 ± 0.017 found**, top of
+the table vs nearest 0.17, lawnmower 0.16, ray_follower 0.16; the motion-only **`oracle_ideal`**
+bound (all locations known, obstacle-aware flight, arrival = visit) reaches 1.00 in ~11 km of the
+62 km budget — the gap is search + confirmation, not flight time. LLM hint ablation: no lift on the
+closed-set sim (DESIGN_VARIANTS §H5). PPO-from-scratch plateaus at the heuristic level
 (0.52–0.55 / 0.38); the 7-variant sweep (OSMO) found: reward penalties cost ~0.06–0.10 found (noreward 0.66–0.67 leads every
 comms setting), decentral ≈ central, blackout ≈ −0.05, rays are the sharing payload that matters, and
 noreward PPO-from-scratch matches the warm-start on synthetic (see DESIGN_VARIANTS.md §H2).

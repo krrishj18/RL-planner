@@ -24,21 +24,26 @@
 
 ## Key works in detail (for speaker notes)
 
-**ARiADNE → HEADER (Cao et al., ICRA 2023; HEADER 2025).** Training: pure 2D occupancy grid; viewpoint
-graph over known free space; attention/pointer policy trained with SAC (~24 h, one consumer GPU) for
-exploration progress. Deployment: real ground robot via ROS — HEADER beats TARE by 6–24% path length,
-300×230 m outdoor site. The 2D→3D step is not transfer: the SLAM stack collapses the 3D world to the
-same 2D occupancy map the policy trained on, valid only because a ground robot lives on a plane
-("does not consider multilayer environments"). Unavailable to drones over rubble.
+**Vashisth et al. (2024/25) — abstract-sim → 44 real drones.** Multi-UAV target discovery with
+(x, y, z, heading) actions — the aerial dimension kept — trained in a deliberately abstract 3D env
+(occupancy map + GP target-utility layer + GP comms model, no renderer), PPO with a centralized
+critic (CTDE), ~120k interactions on one A30. Zero-shot to 44 real Tellos: 66.0% vs 52.3% targets
+found; trained with 3 robots, generalizes to 64. The direct precedent for our bet: keep the axes
+the task depends on in a cheap abstraction and the transfer survives. Our 2.5D heightfield +
+emulated RayFronts is the same move with a richer semantic interface.
 
-**MAANS (Yu et al., ECCV 2022).** Multi-agent exploration in 3D Habitat, but the learned team planner
-never sees 3D: per-robot observations are projected to stacked 2D maps, a CNN picks each robot's
-spatial global goal (MAPPO, ~10⁴ episodes), a frozen local policy moves. The 2D map is the interface
-between 3D world and 2D-trained planner — the pattern we generalize with a height-keeping interface.
-Gains shrink −20.6% → −8.0% from train to unseen scenes; never deployed outside simulation.
+**MAANS (Yu et al., ECCV 2022) — the multi-robot map-interface pattern.** Each robot's RGB-D +
+pose stream is projected by a neural-SLAM front-end into top-down 2D grids (obstacles, explored
+area, own trail, teammates' merged maps/positions) concatenated like image channels into an H×W×C
+tensor. A CNN encoder + spatial/team attention ("Spatial-TeamFormer") reads it and picks each
+robot's **global goal — a location on the map**; a frozen pre-trained local policy does the moving.
+Trained with MAPPO, reward = newly explored area, ~10⁴ Habitat episodes. "2D-trained" because
+everything the planner sees or decides lives on that flat map — valid for a ground robot on one
+floor. Same interface pattern as ours, except their map drops height and ours keeps it. Gains
+shrink −20.6% → −8.0% from train to unseen scenes; never left simulation.
 
 **Labiosa & Hanna (2025).** The abstraction-fidelity result: a ~30× cheaper training sim transfers
 zero-shot to the real robot only after injecting the one stochastic effect that matters (contact
-noise); without it 9/10 real trials fail. Principle: abstractions must keep the axis the task depends
-on. For aerial search that axis is altitude + occlusion → our 2.5D heightfield with real altitudes
-and 3D ray-marched line of sight.
+noise); without it 9/10 real trials fail. Principle: abstractions must keep the axis the task
+depends on. For aerial search that axis is altitude + occlusion → our 2.5D heightfield with real
+altitudes and 3D ray-marched line of sight.
